@@ -29,7 +29,7 @@ typedef std::function<Graph (Graph src)> PassFunction;
 /*!
  * \brief Apply a series of pass transformations on the input graph.
  * \param src The graph to be transformed.
- * \param pass A list of pass names to be applied.
+ * \param passes A list of pass names to be applied.
  * \return The transformed graph
  */
 Graph ApplyPasses(Graph src,
