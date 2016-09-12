@@ -139,9 +139,15 @@ NNVM_REGISTER_PASS(Gradient)
 .describe("Return a gradient graph of src.attrs[\"ys\"] wrt src.attrs[\"xs\"]")
 .set_body(Gradient)
 .set_change_graph(true)
+// Output NodeEntry of forward graph.
 .depend_graph_attr("grad_ys")
+// Input NodeEntries of forward graph; also gradient targets.
 .depend_graph_attr("grad_xs")
-.depend_graph_attr("grad_ys_out_grad");
+// Output gradient NodeEntries of forward graph; also gradient targets.
+.depend_graph_attr("grad_ys_out_grad")
+// A map from forward entry to its corresponding backward entry.
+.provide_graph_attr("entry_grad_map")
+;
 
 }  // namespace
 }  // namespace pass
