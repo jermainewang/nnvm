@@ -8,6 +8,7 @@
 #include <nnvm/op_attr_types.h>
 #include <algorithm>
 #include <functional>
+#include <unordered_map>
 
 namespace nnvm {
 namespace pass {
@@ -106,31 +107,65 @@ Graph Gradient(Graph src) {
   static auto& grad_fun_map = Op::GetAttr<FGradient>("FGradient");
   std::vector<NodeEntry> out_agg_grads;
   for (auto rit = topo_order.rbegin(); rit != topo_order.rend(); ++rit) {
-    const NodePtr& ptr = *rit;
+    const NodePtr ptr = *rit;
     if (ptr->is_variable()) continue;
     out_agg_grads.clear();
     for (GradEntry& e : output_grads.at(ptr.get())) {
       e.sum = agg_fun(std::move(e.grads));
       out_agg_grads.push_back(e.sum);
     }
-    std::vector<NodeEntry> input_grads = grad_fun_map[ptr->op()]
+    const std::vector<NodeEntry>& input_grads = grad_fun_map[ptr->op()]
         (mirror_map.size() == 0 ? ptr : mirror_map.at(ptr.get()), out_agg_grads);
-    auto git = input_grads.begin();
-    for (auto it = (*rit)->inputs.begin(); it != (*rit)->inputs.end(); ++it, ++git) {
-      output_grads[it->node.get()][it->index].grads.emplace_back(std::move(*git));
+    CHECK_EQ(input_grads.size(), ptr->inputs.size());
+    for (size_t i = 0; i < ptr->inputs.size(); ++i) {
+      const NodePtr in_node = ptr->inputs[i].node;
+      const uint32_t index = ptr->inputs[i].index;
+      output_grads[in_node.get()][index].grads.emplace_back(input_grads[i]);
     }
   }
-  // take out the xs' grads
+
+  // Aggregate gradients of each GradEntry
+  for (auto& map_pair : output_grads) {
+    for (GradEntry& grad_entry : map_pair.second) {
+      // Aggregate sum if there haven't been.
+      if (!grad_entry.sum.node) {
+        grad_entry.sum = agg_fun(std::move(grad_entry.grads));
+      }
+    }
+  }
+  
+  // Make the result graph.
   Graph ret;
-  ret.outputs.reserve(xs.size());
+  // Merge forward graph's outputs. Note that we don't keep the original attributes in
+  // forward graph since they may be invalid due to the graph change.
+  // TODO(minjie): Should have mechanism to declare which attribute is invalid after this
+  // GradientPass.
+  ret.outputs.insert(ret.outputs.end(), src.outputs.begin(), src.outputs.end());
+  // Also put the xs' grads in the outputs.
   for (const NodeEntry& e : xs) {
     GradEntry& entry = output_grads[e.node.get()][e.index];
-    // aggregate sum if there haven't been
-    if (entry.sum.node.get() == nullptr) {
-      entry.sum = agg_fun(std::move(entry.grads));
-    }
-    ret.outputs.emplace_back(std::move(entry.sum));
+    CHECK_NOTNULL(entry.sum.node);
+    ret.outputs.push_back(entry.sum);
   }
+
+  // Save the entry mapping to the "forward2backward" $ "backward2forward" attributes.
+  const IndexedGraph& idxgraph = ret.indexed_graph();
+  std::unordered_map<uint32_t, uint32_t> forward2backward;
+  std::unordered_map<uint32_t, uint32_t> backward2forward;
+  for (const auto& map_pair : output_grads) {
+    const Node* node = map_pair.first;
+    const uint32_t nodeid = idxgraph.node_id(node);
+    for (size_t i = 0; i < node->num_outputs(); ++i) {
+      const uint32_t forward_entid = idxgraph.entry_id(nodeid, i);
+      const uint32_t backward_entid = idxgraph.entry_id(map_pair.second[i].sum);
+      forward2backward[forward_entid] = backward_entid;
+      backward2forward[backward_entid] = forward_entid;
+      LOG(INFO) << "Map between: " << forward_entid << " and " << backward_entid;
+    }
+  }
+  ret.attrs["forward2backward"] = std::make_shared<any>(std::move(forward2backward));
+  ret.attrs["backward2forward"] = std::make_shared<any>(std::move(backward2forward));
+
   return ret;
 }
 
@@ -146,7 +181,9 @@ NNVM_REGISTER_PASS(Gradient)
 // Output gradient NodeEntries of forward graph; also gradient targets.
 .depend_graph_attr("grad_ys_out_grad")
 // A map from forward entry to its corresponding backward entry.
-.provide_graph_attr("entry_grad_map")
+.provide_graph_attr("forward2backward")
+// A map from backward entry to its corresponding forward entry.
+.provide_graph_attr("backward2forward")
 ;
 
 }  // namespace
