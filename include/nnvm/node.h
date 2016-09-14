@@ -58,7 +58,7 @@ struct NodeAttrs {
   /*! \brief The dictionary representation of attributes */
   std::unordered_map<std::string, std::string> dict;
   /*!
-   * \brief A parsed version of attributes,
+   * \brief A parsed version of attributes (e.g. An OpProperty object),
    * This is generated if OpProperty.attr_parser is registered.
    * The object can be used to quickly access attributes.
    */

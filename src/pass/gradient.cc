@@ -143,19 +143,28 @@ Graph Gradient(Graph src) {
   ret.outputs.insert(ret.outputs.end(), src.outputs.begin(), src.outputs.end());
   // Also put the xs' grads in the outputs.
   for (const NodeEntry& e : xs) {
-    GradEntry& entry = output_grads[e.node.get()][e.index];
+    const GradEntry& entry = output_grads[e.node.get()][e.index];
     CHECK_NOTNULL(entry.sum.node);
     ret.outputs.push_back(entry.sum);
   }
 
-  // Save the entry mapping to the "forward2backward" $ "backward2forward" attributes.
+  // Save the entry mapping to the "forward2backward" and "backward2forward" attributes.
   const IndexedGraph& idxgraph = ret.indexed_graph();
   std::unordered_map<uint32_t, uint32_t> forward2backward;
   std::unordered_map<uint32_t, uint32_t> backward2forward;
   for (const auto& map_pair : output_grads) {
-    const Node* node = map_pair.first;
+    const Node* node = map_pair.first;  // Forward node.
     const uint32_t nodeid = idxgraph.node_id(node);
     for (size_t i = 0; i < node->num_outputs(); ++i) {
+      const GradEntry& grad_ent = map_pair.second[i];
+      if (!idxgraph.has_node(grad_ent.sum.node.get())) {
+        // The node generating the gradient entry does not exist in the graph.
+        // This means the gradient of this output entry is somehow not used in the backward
+        // propagation. In this case, simply ignore it in the entry mapping.
+        // NOTE: this also means not all the forward node entries are contained in the
+        // gradient mapping.
+        continue;
+      }
       const uint32_t forward_entid = idxgraph.entry_id(nodeid, i);
       const uint32_t backward_entid = idxgraph.entry_id(map_pair.second[i].sum);
       forward2backward[forward_entid] = backward_entid;

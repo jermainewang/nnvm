@@ -20,7 +20,12 @@ namespace {
 // Visitor function for PrintPass.
 void PrintPassVisitor(const NodePtr& n) {
   if (n->op()) {
-    LOG(INFO) << "PrintPass: Op \"" << n->op()->name << "\"";
+    ostringstream oss;
+    for (const auto& map_pair : n->attrs.dict) {
+      oss << map_pair.first << " : " << map_pair.second << ", ";
+    }
+    LOG(INFO) << "PrintPass: Node: \"" << n->attrs.name << "\"; Op \""
+              << n->op()->name << "\"; Attrs: {" << oss.str() << "}";
   }
 }
 
@@ -145,12 +150,9 @@ class BFS {
     for (size_t i = 0; i < node_levels_.size(); ++i) {
       LOG(INFO) << "Level Node: [";
       for (uint32_t nodeid : node_levels_[i]) {
-        const Op* op = graph[nodeid].source->op();
-        if (op) {
-          LOG(INFO) << "\t#" << nodeid << ": " << op->name << ",";
-        } else {
-          LOG(INFO) << "\t#" << nodeid << ": null,";
-        }
+        const Node* node = graph[nodeid].source;
+        LOG(INFO) << "\t#" << nodeid << ": \"" << node->attrs.name << "\""
+                  << (node->is_variable()? "(variable)" : "");
       }
       LOG(INFO) << "]";
       if (i < entry_group_levels_.size()) {
@@ -261,6 +263,7 @@ Graph PartitionPass(Graph src) {
   BFS bfs(&src, &groups);
   bfs.Run(start_node_id);
   bfs.Print();
+
   return src;
 }
 
