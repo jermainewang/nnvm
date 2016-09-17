@@ -91,20 +91,41 @@ Graph InferAttr(Graph &&ret,
       // Backward operator inference.
       CHECK_GE(inode.control_deps.size(), 1)
           << "BackwardOp need to have control_deps to its forward op";
-      const IndexedGraph::Node& fnode = idx[inode.control_deps[0]];
+      const uint32_t fnode_id = inode.control_deps[0];
+      const IndexedGraph::Node& fnode = idx[fnode_id];
       // Inference the outputs of backward operator (equal to the inputs
       // of its corresponding forward operator).
-      std::vector<uint32_t> out_map =
+      const std::vector<uint32_t>& out_map =
           backward_map[inode.source->op()](inode.source->attrs);
       bool known = true;
       for (size_t i = 0; i < out_map.size(); ++i) {
-        uint32_t in_id = out_map[i];
-        CHECK_LT(in_id, fnode.inputs.size());
-        rshape[idx.entry_id(nid, i)] =
-            rshape[idx.entry_id(fnode.inputs[in_id])];
-        if (fis_none(rshape[idx.entry_id(nid, i)])) known = false;
+        CHECK_LT(out_map[i], fnode.inputs.size());
+        const uint32_t fwd_in_ent_id = idx.entry_id(fnode.inputs[out_map[i]]);
+        const uint32_t bwd_out_ent_id = idx.entry_id(nid, i);
+        rshape[bwd_out_ent_id] = rshape[fwd_in_ent_id];
+        if (fis_none(rshape[bwd_out_ent_id])) {
+          // Still unknown due to the forward shape is also unknown.
+          known = false;
+        }
       }
       num_unknown += !known;
+    }
+  }
+  // Inference & check shapes using gradient entry mapping if available.
+  if (ret.attrs.count("forward2backward") != 0) {
+    const std::unordered_map<uint32_t, uint32_t>& forward2backward
+      = ret.GetAttr<std::unordered_map<uint32_t, uint32_t>>("forward2backward");
+    for (const auto& fwd2bwd : forward2backward) {
+      const uint32_t fwd_ent_id = fwd2bwd.first;
+      const uint32_t bwd_ent_id = fwd2bwd.second;
+      if (fis_none(rshape[bwd_ent_id])) {
+        rshape[bwd_ent_id] = rshape[fwd_ent_id];
+      } else {
+        CHECK_EQ(rshape[bwd_ent_id], rshape[fwd_ent_id])
+          << rshape[bwd_ent_id] << " v.s. " << rshape[fwd_ent_id]
+          << " Backward entry (#" << bwd_ent_id << ") shape should equal to "
+          << "its corresponding forward (#" << fwd_ent_id << ") entry shape.";
+      }
     }
   }
   // set the shapes
