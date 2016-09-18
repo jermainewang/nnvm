@@ -42,6 +42,72 @@ bool NextSchemeVec(const vector<DPEntry>& entries, vector<Scheme>* schvec) {
   }
   return false;
 }
+// Return the pointer list to the contents given the index.
+// prev_level and next_level could be nullptr when the function is called for the operators
+// in the first and last BFS levels.
+template<typename T>
+vector<const T*> ExtractFromIndex(
+    const vector<BFS::Index>& index,
+    const vector<T>* prev_level,
+    const vector<T>* next_level,
+    size_t current_level) {
+  vector<const T*> ret;
+  for (const BFS::Index& idx : index) {
+    if (idx.first == current_level) {
+      // Content is in next level.
+      CHECK_NOTNULL(next_level);
+      ret.push_back(&(next_level->at(idx.second)));
+    } else if (idx.first == current_level - 1) {
+      // Content is in prev level.
+      CHECK_NOTNULL(prev_level);
+      ret.push_back(&(prev_level->at(idx.second)));
+    } else {
+      LOG(FATAL) << "Invalid entry index (" << idx.first << ", " << idx.second
+                 << ") for operator in level #" << current_level;
+    }
+  }
+  return ret;
+}
+
+pair<cost_t, size_t> ConversionCost(
+    const vector<const Scheme*>& input_schemes,
+    const vector<const DPEntry*>& input_entries,
+    const vector<const Scheme*>& output_schemes,
+    const vector<const DPEntry*>& output_entries,
+    const vector<SchemeRequest>& aligned_requests) {
+  CHECK_EQ(input_schemes.size(), input_entries.size());
+  CHECK_EQ(output_schemes.size(), output_entries.size());
+  CHECK_GT(aligned_requests.size(), 0);
+  cost_t cost = std::numeric_limits<cost_t>::max();
+  size_t req_idx = 0;
+  for (size_t i = 0; i < aligned_requests.size(); ++i) {
+    const SchemeRequest& req = aligned_requests[i];
+    CHECK_EQ(input_schemes.size(), req.input_schemes.size());
+    CHECK_EQ(output_schemes.size(), req.output_schemes.size());
+    cost_t req_cost = 0;
+    // Input conversion cost.
+    for (size_t j = 0; j < input_schemes.size(); ++j) {
+      req_cost += Region::ConvertCost2(input_entries[j]->region,
+                                       *input_schemes[j],
+                                       input_entries[j]->ghost_region,
+                                       req.input_schemes[j]);
+    }
+    // Output conversion cost.
+    for (size_t j = 0; j < output_schemes.size(); ++j) {
+      req_cost += Region::ConvertCost2(output_entries[j]->ghost_region,
+                                       req.output_schemes[j],
+                                       output_entries[j]->region,
+                                       *output_schemes[j]);
+    }
+    // Save the minimal cost.
+    if (req_cost < cost) {
+      cost = req_cost;
+      req_idx = i;
+    }
+  }
+  return make_pair(cost, req_idx);
+}
+
 }  // namespace
 
 NodeEntryGroups::NodeEntryGroups(
@@ -181,6 +247,17 @@ void BFS::AddNodeEntry(uint32_t levelid, uint32_t entry_id) {
   }
 }
 
+pair<Region, Region> Region::Split2(const Scheme& sch) const {
+  // TODO
+  return pair<Region, Region>();
+}
+
+cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
+                            const Region& r2, const Scheme& sch2) {
+  // TODO
+  return 0;
+}
+
 CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bfs) {
   const IndexedGraph& idxgraph = src->indexed_graph();
   const OpMap<FAlignedSchemes>& align_map =
@@ -229,7 +306,8 @@ CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bf
       const uint32_t ent_group_id = bfs.entry_group_levels_[i][j];
       dpent.entry_group_id = ent_group_id;
       const uint32_t ent_id = *((*bfs.entry_groups_)[ent_group_id].begin());
-      dpent.region = Region(shapes[ent_id]);
+      // The initial ghost region is the same as region.
+      dpent.region = dpent.ghost_region = Region(shapes[ent_id]);
       dp_entries_[i].push_back(dpent);
     }
   }
@@ -265,7 +343,82 @@ void CutAlgorithm::Reset() {
 }
 
 void CutAlgorithm::OneCut() {
+  CHECK_GT(dp_states_.size(), 0);
+  // Init state for BFS level 0.
+  for (DPState& state: dp_states_[0]) {
+    state.cost = 0;
+    for (const DPOp& op : dp_operators_[0]) {
+      if (IsVariable(op)) {
+        // Variable operator. Any scheme should be fine, so no conversion cost.
+        // Just put index 0 as the chosen aligned request.
+        state.chosen_aligned_requests.push_back(0);
+        continue;
+      }
+      const vector<const Scheme*>& input_schemes =
+        ExtractFromIndex<Scheme>(op.input_entry_index, nullptr, &state.schemes, 0);
+      const vector<const Scheme*>& output_schemes =
+        ExtractFromIndex<Scheme>(op.output_entry_index, nullptr, &state.schemes, 0);
+      const vector<const DPEntry*>& input_entries =
+        ExtractFromIndex<DPEntry>(op.input_entry_index, nullptr, &dp_entries_[0], 0);
+      const vector<const DPEntry*>& output_entries =
+        ExtractFromIndex<DPEntry>(op.output_entry_index, nullptr, &dp_entries_[0], 0);
+      cost_t op_cost = 0;
+      size_t chosen_request = 0;
+      tie(op_cost, chosen_request) = ConversionCost(input_schemes, input_entries,
+                                                    output_schemes, output_entries,
+                                                    op.aligned_requests);
+      state.cost += op_cost;
+      state.chosen_aligned_requests.push_back(chosen_request);
+    }
+  }
+  // Do DP.
+  for (size_t i = 1; i < dp_states_.size(); ++i) {
+    for (size_t j = 0; j < dp_states_[i].size(); ++j) {
+      DPState& next_state = dp_states_[i][j];
+      // Compute minimal cost to reach this state by looping all possible previous states.
+      next_state.cost = std::numeric_limits<cost_t>::max();
+      for (size_t k = 0; k < dp_states_[i-1].size(); ++k) {
+        DPState& prev_state = dp_states_[i-1][k];
+        cost_t state_cost = 0;
+        vector<size_t> op_requests;
+        for (const DPOp& op : dp_operators_[i]) {
+          if (IsVariable(op)) {
+            // Variable operator. Any scheme should be fine, so no conversion cost.
+            // Just put index 0 as the chosen aligned request.
+            op_requests.push_back(0);
+            continue;
+          }
+          const vector<const Scheme*>& input_schemes =
+            ExtractFromIndex<Scheme>(op.input_entry_index, &prev_state.schemes,
+                                     &next_state.schemes, i);
+          const vector<const Scheme*>& output_schemes =
+            ExtractFromIndex<Scheme>(op.output_entry_index, &prev_state.schemes,
+                                     &next_state.schemes, i);
+          const vector<const DPEntry*>& input_entries =
+            ExtractFromIndex<DPEntry>(op.input_entry_index, &dp_entries_[i-1],
+                                      &dp_entries_[i], i);
+          const vector<const DPEntry*>& output_entries =
+            ExtractFromIndex<DPEntry>(op.output_entry_index, &dp_entries_[i-1],
+                                      &dp_entries_[i], i);
+          cost_t op_cost = 0;
+          size_t chosen_request = 0;
+          tie(op_cost, chosen_request) = ConversionCost(input_schemes, input_entries,
+                                                        output_schemes, output_entries,
+                                                        op.aligned_requests);
+          state_cost += op_cost;
+          op_requests.push_back(chosen_request);
+        }
+        if (state_cost < next_state.cost) {
+          // Record this.
+          next_state.cost = state_cost;
+          next_state.prev_state_index = k;
+          next_state.chosen_aligned_requests = std::move(op_requests);
+        }
+      }
+    }
+  }
 }
+
 
 }  // namespace pass
 }  // namespace nnvm

@@ -144,6 +144,9 @@ struct DPState {
   std::vector<Scheme> schemes;
   // Minimal cost to reach this state.
   cost_t cost = 0;
+  // The state index in the previous BFS level that is used to reach the optimal
+  // cost of this state.
+  int prev_state_index = -1;
   // Aligned request chosen for each operator in this state to get the minimal cost.
   std::vector<size_t> chosen_aligned_requests;
 
@@ -170,6 +173,10 @@ class CutAlgorithm {
   
   // Clear all states computed by DP, but leave those auxiliary structures.
   void Reset();
+
+  inline bool IsVariable(const DPOp& op) const {
+    return src_graph_->indexed_graph()[op.node_id].source->is_variable();
+  }
 
   Graph* src_graph_;
   const BFS& bfs_;

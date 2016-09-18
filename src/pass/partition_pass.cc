@@ -73,6 +73,7 @@ Graph PartitionPass(Graph src) {
 
   // Cut algorithm.
   CutAlgorithm algo(&src, bfs);
+  algo.OneCut();
 
   return src;
 }
