@@ -8,9 +8,65 @@
 
 using namespace std;
 
+namespace {
+ostream& operator << (ostream& os, const nnvm::Scheme& sch) {
+  using nnvm::Scheme;
+  switch (sch.type) {
+  case Scheme::kCut: return os << "C" << sch.dim;
+  case Scheme::kRep: return os << "Rp";
+  case Scheme::kRed: return os << "Rd";
+  default:
+    LOG(FATAL) << "Unknown scheme type: " << sch.type;
+  }
+  return os;
+}
+ostream& operator << (ostream& os, const nnvm::pass::Region& region) {
+  return os << "Region {offset: " << region.offset()
+            << " shape: " << region.shape()
+            << " entry: " << region.entry_shape() << "}";
+}
+nnvm::TShape operator + (const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
+  using nnvm::TShape;
+  CHECK_EQ(shp1.ndim(), shp2.ndim());
+  TShape ret = shp1;
+  for (size_t i = 0; i < shp1.ndim(); ++i) {
+    ret[i] += shp2[i];
+  }
+  return ret;
+}
+nnvm::TShape operator - (const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
+  using nnvm::TShape;
+  CHECK_EQ(shp1.ndim(), shp2.ndim());
+  TShape ret = shp1;
+  for (size_t i = 0; i < shp1.ndim(); ++i) {
+    ret[i] -= shp2[i];
+  }
+  return ret;
+}
+nnvm::TShape max(const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
+  using nnvm::TShape;
+  CHECK_EQ(shp1.ndim(), shp2.ndim());
+  TShape ret = shp1;
+  for (size_t i = 0; i < shp1.ndim(); ++i) {
+    ret[i] = std::max(ret[i], shp2[i]);
+  }
+  return ret;
+}
+nnvm::TShape min(const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
+  using nnvm::TShape;
+  CHECK_EQ(shp1.ndim(), shp2.ndim());
+  TShape ret = shp1;
+  for (size_t i = 0; i < shp1.ndim(); ++i) {
+    ret[i] = std::min(ret[i], shp2[i]);
+  }
+  return ret;
+}
+}  // namespace
+
 namespace nnvm {
 namespace pass {
 namespace {
+
 // Return the number of possible partition schemes given the shape.
 inline size_t NumPossibleSchemes(const TShape& shape) {
   return shape.ndim() + 1;
@@ -248,14 +304,82 @@ void BFS::AddNodeEntry(uint32_t levelid, uint32_t entry_id) {
 }
 
 pair<Region, Region> Region::Split2(const Scheme& sch) const {
-  // TODO
+  switch (sch.type) {
+  case Scheme::kCut:
+    {
+    TShape shp = region_shape_;
+    CHECK(shp[sch.dim] % 2 == 0) << "Dimension " << sch.dim << " of size "
+      << shp[sch.dim] << " cannot be splitted into two.";
+    shp[sch.dim] /= 2;
+    TShape offset = region_offset_;
+    offset[sch.dim] += shp[sch.dim];
+    Region r1(entry_shape_, region_offset_, shp);
+    Region r2(entry_shape_, offset, shp);
+    return make_pair(r1, r2);
+    }
+  case Scheme::kRep:
+    {
+    return make_pair(*this, *this);
+    }
+  default:
+    LOG(FATAL) << "Scheme: " << sch << " is not supported for split.";
+  }
   return pair<Region, Region>();
+}
+  
+cost_t Region::IntersectArea(const Region& r1, const Region& r2) {
+  const TShape& r1_end = r1.offset() + r1.shape();
+  const TShape& r2_end = r2.offset() + r2.shape();
+  const TShape& st = max(r1.offset(), r2.offset());
+  const TShape& ed = min(r1_end, r2_end);
+  cost_t cost = 1;
+  for (size_t i = 0; i < st.ndim(); ++i) {
+    if (ed[i] <= st[i]) {
+      // No intersection.
+      return 0;
+    } else {
+      cost *= ed[i] - st[i];
+    }
+  }
+  return cost;
 }
 
 cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
                             const Region& r2, const Scheme& sch2) {
-  // TODO
-  return 0;
+  CHECK_EQ(r1.Area(), r2.Area());
+  CHECK_NE(sch2.type, Scheme::kRed)
+    << "Reduction scheme is intermediate and could not be used as conversion target";
+  cost_t cost = 0;
+  if (sch1.type == Scheme::kRed) {
+    // Reduction scheme requires special calculation.
+    // TODO
+    if (sch2.type == Scheme::kCut) {
+      cost = r1.Area();
+    } else if (sch2.type == Scheme::kRep) {
+      cost = 2 * r1.Area();
+    } else {
+      LOG(FATAL) << "Invalid target scheme: " << sch2;
+    }
+  } else {
+    if (sch1.type == Scheme::kRep) {
+      // If the source scheme is replication, then all data could be fetched locally.
+    } else {
+      const pair<Region, Region>& r1split = r1.Split2(sch1);
+      const pair<Region, Region>& r2split = r2.Split2(sch2);
+      cost += Region::IntersectArea(r1split.first, r2split.second);
+      cost += Region::IntersectArea(r1split.second, r2split.first);
+    }
+    if (sch2.type == Scheme::kRep) {
+      // If target scheme is replication, extra cost is required to replicate the area
+      // that does not overlap with the source one (i.e, r2 - r1).
+      cost += r2.Area() - Region::IntersectArea(r1, r2);
+    }
+  }
+  if (sch1.type == sch2.type && sch1.dim == sch2.dim) {
+    CHECK_EQ(cost, 0) << "cost=" << cost << " " << r1 << ": " << sch1 << "\t" << r2 << ": " << sch2;
+  }
+  CHECK_GE(cost, 0);
+  return cost;
 }
 
 CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bfs) {
@@ -341,7 +465,7 @@ void CutAlgorithm::Reset() {
     }
   }
 }
-
+  
 void CutAlgorithm::OneCut() {
   CHECK_GT(dp_states_.size(), 0);
   // Init state for BFS level 0.
@@ -370,6 +494,11 @@ void CutAlgorithm::OneCut() {
       state.cost += op_cost;
       state.chosen_aligned_requests.push_back(chosen_request);
     }
+    cout << "[";
+    for (const auto& sch : state.schemes) {
+      cout << sch << " ";
+    }
+    cout << "]: " << state.cost << endl;
   }
   // Do DP.
   for (size_t i = 1; i < dp_states_.size(); ++i) {
@@ -379,7 +508,7 @@ void CutAlgorithm::OneCut() {
       next_state.cost = std::numeric_limits<cost_t>::max();
       for (size_t k = 0; k < dp_states_[i-1].size(); ++k) {
         DPState& prev_state = dp_states_[i-1][k];
-        cost_t state_cost = 0;
+        cost_t state_cost = prev_state.cost;
         vector<size_t> op_requests;
         for (const DPOp& op : dp_operators_[i]) {
           if (IsVariable(op)) {
@@ -415,10 +544,72 @@ void CutAlgorithm::OneCut() {
           next_state.chosen_aligned_requests = std::move(op_requests);
         }
       }
+      //LOG(INFO) << "DP cost: level #" << i << " state #" << j << ": " << next_state.cost;
+    }
+  }
+  // If the last level is node level, the total cost should also includes that.
+  // TODO
+
+  // Extract the optimal plan.
+  ExtractOptimalPlan();
+}
+
+void CutAlgorithm::ExtractOptimalPlan() {
+  size_t num_levels = dp_states_.size();
+  cost_t min_cost = std::numeric_limits<cost_t>::max();
+  DPState* min_state = nullptr;
+  for (DPState& state : dp_states_[num_levels-1]) {
+    if (state.cost < min_cost) {
+      min_cost = state.cost;
+      min_state = &state;
+    }
+  }
+  LOG(INFO) << "Min cost: " << min_cost;
+  for (int i = dp_states_.size() - 1; i >= 0; --i) {
+    CHECK_EQ(dp_entries_[i].size(), min_state->schemes.size());
+    for (size_t j = 0; j < dp_entries_[i].size(); ++j) {
+      dp_entries_[i][j].chosen_schemes.push_back(
+          min_state->schemes[j]);
+    }
+    // TODO operator requests (attention for variable node).
+    if (i > 0) {
+      min_state = &dp_states_[i-1][min_state->prev_state_index];
     }
   }
 }
 
+void CutAlgorithm::Print() const {
+  const IndexedGraph& graph = src_graph_->indexed_graph();
+  const ShapeVector& shapes = src_graph_->GetAttr<ShapeVector>("shape");
+  for (size_t i = 0; i < dp_operators_.size(); ++i) {
+    LOG(INFO) << "Level Node: [";
+    for (const auto& dp_op : dp_operators_[i]) {
+      const uint32_t nodeid = dp_op.node_id;
+      const Node* node = graph[nodeid].source;
+      LOG(INFO) << "\t#" << nodeid << ": \"" << node->attrs.name << "\""
+                << (node->is_variable()? "(variable)" : "");
+    }
+    LOG(INFO) << "]";
+    if (i < dp_entries_.size()) {
+      LOG(INFO) << "Level NodeEntry: [";
+      for (const auto& dp_ent : dp_entries_[i]) {
+        const uint32_t groupid = dp_ent.entry_group_id;
+        ostringstream oss;
+        oss << "\t{";
+        for (const uint32_t entid : (*bfs_.entry_groups_)[groupid]) {
+          oss << "#" << entid << ": " << shapes[entid] << ", ";
+        }
+        oss << "}, [";
+        for (const Scheme& sch : dp_ent.chosen_schemes) {
+          oss << sch << " ";
+        }
+        oss << "]";
+        LOG(INFO) << oss.str();
+      }
+      LOG(INFO) << "]";
+    }
+  }
+}
 
 }  // namespace pass
 }  // namespace nnvm

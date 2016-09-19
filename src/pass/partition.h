@@ -19,7 +19,7 @@ namespace pass {
 
 class CutAlgorithm;
 
-typedef uint64_t cost_t;
+typedef int64_t cost_t;
 
 class NodeEntryGroups {
   // Some NodeEntrys should have same partition schemes. They should be put in one group.
@@ -97,16 +97,28 @@ class Region {
  public:
   // Constructors.
   Region() {}
-  Region(const TShape& shp): entry_shape_(shp), region_shape_(shp) {}
+  Region(const TShape& shp):
+    entry_shape_(shp), region_offset_(shp.ndim()), region_shape_(shp) {
+    for (size_t i = 0; i < shp.ndim(); ++i) {
+      region_offset_[i] = 0;
+    }
+  }
   Region(const TShape& ent_shp, const TShape& reg_off,
-         const TShape& reg_shp, uint32_t replica):
+         const TShape& reg_shp):
     entry_shape_(ent_shp), region_offset_(reg_off),
-    region_shape_(reg_shp), replica_(replica) {}
+    region_shape_(reg_shp) {}
 
-  const TShape& shape() const { return region_shape_; }
+  inline const TShape& shape() const { return region_shape_; }
+
+  inline const TShape& offset() const { return region_offset_; }
+
+  inline const TShape& entry_shape() const { return entry_shape_; }
 
   // Partition this region into two sub-regions.
   std::pair<Region, Region> Split2(const Scheme& sch) const;
+
+  // Area of the region.
+  inline cost_t Area() const { return region_shape_.Size(); }
 
   // Compute the intersection area.
   static cost_t IntersectArea(const Region& r1, const Region& r2);
@@ -121,14 +133,13 @@ class Region {
   TShape entry_shape_;
   // Region offset, and shape.
   TShape region_offset_, region_shape_;
-  // Replication id.
-  uint32_t replica_ = 0;
 };
 
 struct DPEntry {
   uint32_t entry_group_id;
   Region region;
   Region ghost_region;
+  // Recorded optimal schemes for each one-cut algorithm.
   std::vector<Scheme> chosen_schemes;
 };
 
@@ -137,6 +148,8 @@ struct DPOp {
   std::vector<BFS::Index> input_entry_index;
   std::vector<BFS::Index> output_entry_index;
   std::vector<SchemeRequest> aligned_requests;
+  // Recorded optimal request for each one-cut algorithm.
+  std::vector<size_t> chosen_aligned_requests;
 };
 
 struct DPState {
@@ -167,6 +180,9 @@ class CutAlgorithm {
   // Get schemes of a node entry.
   const std::vector<Scheme>& GetEntryScheme(uint32_t entry_id) const;
 
+  // Print debug information.
+  void Print() const;
+
  private:
   // Init all DP states. Create auxiliary structures for the main algorithm.
   void Init();
@@ -177,6 +193,10 @@ class CutAlgorithm {
   inline bool IsVariable(const DPOp& op) const {
     return src_graph_->indexed_graph()[op.node_id].source->is_variable();
   }
+
+  // Extract optimal plan from the states computed by one-cut algorithm. The plan includes
+  // schemes of each node entry and which aligned request is used for each node.
+  void ExtractOptimalPlan();
 
   Graph* src_graph_;
   const BFS& bfs_;
