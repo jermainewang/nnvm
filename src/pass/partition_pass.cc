@@ -73,8 +73,11 @@ Graph PartitionPass(Graph src) {
 
   // Cut algorithm.
   CutAlgorithm algo(&src, bfs);
-  algo.OneCut();
+  //algo.OneCut();
+  //algo.Print();
+  cost_t total_cost = algo.KCuts(3);
   algo.Print();
+  LOG(INFO) << "Total K-cuts cost: " << total_cost;
 
   return src;
 }

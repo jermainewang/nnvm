@@ -21,9 +21,9 @@ ostream& operator << (ostream& os, const nnvm::Scheme& sch) {
   return os;
 }
 ostream& operator << (ostream& os, const nnvm::pass::Region& region) {
-  return os << "Region {offset: " << region.offset()
-            << " shape: " << region.shape()
-            << " entry: " << region.entry_shape() << "}";
+  return os << "[" << region.offset()
+            << " + " << region.shape()
+            << " in: " << region.entry_shape() << "]";
 }
 nnvm::TShape operator + (const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
   using nnvm::TShape;
@@ -123,45 +123,6 @@ vector<const T*> ExtractFromIndex(
     }
   }
   return ret;
-}
-
-pair<cost_t, size_t> ConversionCost(
-    const vector<const Scheme*>& input_schemes,
-    const vector<const DPEntry*>& input_entries,
-    const vector<const Scheme*>& output_schemes,
-    const vector<const DPEntry*>& output_entries,
-    const vector<SchemeRequest>& aligned_requests) {
-  CHECK_EQ(input_schemes.size(), input_entries.size());
-  CHECK_EQ(output_schemes.size(), output_entries.size());
-  CHECK_GT(aligned_requests.size(), 0);
-  cost_t cost = std::numeric_limits<cost_t>::max();
-  size_t req_idx = 0;
-  for (size_t i = 0; i < aligned_requests.size(); ++i) {
-    const SchemeRequest& req = aligned_requests[i];
-    CHECK_EQ(input_schemes.size(), req.input_schemes.size());
-    CHECK_EQ(output_schemes.size(), req.output_schemes.size());
-    cost_t req_cost = 0;
-    // Input conversion cost.
-    for (size_t j = 0; j < input_schemes.size(); ++j) {
-      req_cost += Region::ConvertCost2(input_entries[j]->region,
-                                       *input_schemes[j],
-                                       input_entries[j]->ghost_region,
-                                       req.input_schemes[j]);
-    }
-    // Output conversion cost.
-    for (size_t j = 0; j < output_schemes.size(); ++j) {
-      req_cost += Region::ConvertCost2(output_entries[j]->ghost_region,
-                                       req.output_schemes[j],
-                                       output_entries[j]->region,
-                                       *output_schemes[j]);
-    }
-    // Save the minimal cost.
-    if (req_cost < cost) {
-      cost = req_cost;
-      req_idx = i;
-    }
-  }
-  return make_pair(cost, req_idx);
 }
 
 }  // namespace
@@ -344,15 +305,19 @@ cost_t Region::IntersectArea(const Region& r1, const Region& r2) {
   return cost;
 }
 
+// Note that it is possible that r1 and r2 have different areas. Consider following
+// matmult example:
+//  - First cut: C x R = red -> R
+//  - Second cut: R x r = R
 cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
                             const Region& r2, const Scheme& sch2) {
-  CHECK_EQ(r1.Area(), r2.Area());
   CHECK_NE(sch2.type, Scheme::kRed)
     << "Reduction scheme is intermediate and could not be used as conversion target";
   cost_t cost = 0;
   if (sch1.type == Scheme::kRed) {
     // Reduction scheme requires special calculation.
-    // TODO
+    // Note that if source scheme is reduction, the area of source region and target
+    // region may be different.
     if (sch2.type == Scheme::kCut) {
       cost = r1.Area();
     } else if (sch2.type == Scheme::kRep) {
@@ -375,9 +340,6 @@ cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
       cost += r2.Area() - Region::IntersectArea(r1, r2);
     }
   }
-  if (sch1.type == sch2.type && sch1.dim == sch2.dim) {
-    CHECK_EQ(cost, 0) << "cost=" << cost << " " << r1 << ": " << sch1 << "\t" << r2 << ": " << sch2;
-  }
   CHECK_GE(cost, 0);
   return cost;
 }
@@ -389,6 +351,18 @@ CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bf
   const ShapeVector& shapes =
     src_graph_->GetAttr<ShapeVector>("shape");
   // Init DP structures.
+  dp_entries_.resize(bfs.entry_group_levels_.size());
+  for (size_t i = 0; i < bfs.entry_group_levels_.size(); ++i) {
+    for (size_t j = 0; j < bfs.entry_group_levels_[i].size(); ++j) {
+      DPEntry dpent;
+      const uint32_t ent_group_id = bfs.entry_group_levels_[i][j];
+      dpent.entry_group_id = ent_group_id;
+      const uint32_t ent_id = *((*bfs.entry_groups_)[ent_group_id].begin());
+      // The initial ghost region is the same as region.
+      dpent.region = Region(shapes[ent_id]);
+      dp_entries_[i].push_back(dpent);
+    }
+  }
   dp_operators_.resize(bfs.node_levels_.size());
   for (size_t i = 0; i < bfs.node_levels_.size(); ++i) {
     for (size_t j = 0; j < bfs.node_levels_[i].size(); ++j) {
@@ -402,15 +376,21 @@ CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bf
       vector<TShape> input_shapes, output_shapes;
       for (const NodeEntry& in_ent : node->inputs) {
         const uint32_t in_ent_id = idxgraph.entry_id(in_ent);
+        const TShape& in_shape = shapes[in_ent_id];
         dpop.input_entry_index.push_back(bfs.GetNodeEntryBFSIndex(in_ent_id));
-        input_shapes.push_back(shapes[in_ent_id]);
-        //LOG(INFO) << "!!in shape #" << in_ent_id << " " << shapes[in_ent_id];
+        // Initial ghost area shape is the same as node entry shape.
+        dpop.input_ghost_regions.emplace_back(in_shape);
+        input_shapes.push_back(in_shape);
+        //LOG(INFO) << "!!in shape #" << in_ent_id << " " << in_shape;
       }
       for (size_t k = 0; k < node->num_outputs(); ++k) {
         const uint32_t out_ent_id = idxgraph.entry_id(node_id, k);
+        const TShape& out_shape = shapes[out_ent_id];
         dpop.output_entry_index.push_back(bfs.GetNodeEntryBFSIndex(out_ent_id));
-        output_shapes.push_back(shapes[out_ent_id]);
-        //LOG(INFO) << "!!out shape #" << out_ent_id << " " << shapes[out_ent_id];
+        // Initial ghost area shape is the same as node entry shape.
+        dpop.output_ghost_regions.emplace_back(out_shape);
+        output_shapes.push_back(out_shape);
+        //LOG(INFO) << "!!out shape #" << out_ent_id << " " << out_shape;
       }
       // Aligned requests.
       if (node->is_variable()) {
@@ -421,18 +401,6 @@ CutAlgorithm::CutAlgorithm(Graph* src, const BFS& bfs): src_graph_(src), bfs_(bf
         dpop.aligned_requests = align_func(node->attrs, input_shapes, output_shapes);
       }
       dp_operators_[i].push_back(dpop);
-    }
-  }
-  dp_entries_.resize(bfs.entry_group_levels_.size());
-  for (size_t i = 0; i < bfs.entry_group_levels_.size(); ++i) {
-    for (size_t j = 0; j < bfs.entry_group_levels_[i].size(); ++j) {
-      DPEntry dpent;
-      const uint32_t ent_group_id = bfs.entry_group_levels_[i][j];
-      dpent.entry_group_id = ent_group_id;
-      const uint32_t ent_id = *((*bfs.entry_groups_)[ent_group_id].begin());
-      // The initial ghost region is the same as region.
-      dpent.region = dpent.ghost_region = Region(shapes[ent_id]);
-      dp_entries_[i].push_back(dpent);
     }
   }
   // Init DP states.
@@ -466,8 +434,10 @@ void CutAlgorithm::Reset() {
   }
 }
   
-void CutAlgorithm::OneCut() {
+cost_t CutAlgorithm::OneCut() {
   CHECK_GT(dp_states_.size(), 0);
+  // Reset DP states.
+  Reset();
   // Init state for BFS level 0.
   for (DPState& state: dp_states_[0]) {
     state.cost = 0;
@@ -478,27 +448,12 @@ void CutAlgorithm::OneCut() {
         state.chosen_aligned_requests.push_back(0);
         continue;
       }
-      const vector<const Scheme*>& input_schemes =
-        ExtractFromIndex<Scheme>(op.input_entry_index, nullptr, &state.schemes, 0);
-      const vector<const Scheme*>& output_schemes =
-        ExtractFromIndex<Scheme>(op.output_entry_index, nullptr, &state.schemes, 0);
-      const vector<const DPEntry*>& input_entries =
-        ExtractFromIndex<DPEntry>(op.input_entry_index, nullptr, &dp_entries_[0], 0);
-      const vector<const DPEntry*>& output_entries =
-        ExtractFromIndex<DPEntry>(op.output_entry_index, nullptr, &dp_entries_[0], 0);
       cost_t op_cost = 0;
       size_t chosen_request = 0;
-      tie(op_cost, chosen_request) = ConversionCost(input_schemes, input_entries,
-                                                    output_schemes, output_entries,
-                                                    op.aligned_requests);
+      tie(op_cost, chosen_request) = ConversionCost(op, nullptr, &state, 0);
       state.cost += op_cost;
       state.chosen_aligned_requests.push_back(chosen_request);
     }
-    cout << "[";
-    for (const auto& sch : state.schemes) {
-      cout << sch << " ";
-    }
-    cout << "]: " << state.cost << endl;
   }
   // Do DP.
   for (size_t i = 1; i < dp_states_.size(); ++i) {
@@ -512,28 +467,14 @@ void CutAlgorithm::OneCut() {
         vector<size_t> op_requests;
         for (const DPOp& op : dp_operators_[i]) {
           if (IsVariable(op)) {
-            // Variable operator. Any scheme should be fine, so no conversion cost.
+            // Variable operator. Any scheme should be fine, so conversion cost is zero.
             // Just put index 0 as the chosen aligned request.
             op_requests.push_back(0);
             continue;
           }
-          const vector<const Scheme*>& input_schemes =
-            ExtractFromIndex<Scheme>(op.input_entry_index, &prev_state.schemes,
-                                     &next_state.schemes, i);
-          const vector<const Scheme*>& output_schemes =
-            ExtractFromIndex<Scheme>(op.output_entry_index, &prev_state.schemes,
-                                     &next_state.schemes, i);
-          const vector<const DPEntry*>& input_entries =
-            ExtractFromIndex<DPEntry>(op.input_entry_index, &dp_entries_[i-1],
-                                      &dp_entries_[i], i);
-          const vector<const DPEntry*>& output_entries =
-            ExtractFromIndex<DPEntry>(op.output_entry_index, &dp_entries_[i-1],
-                                      &dp_entries_[i], i);
           cost_t op_cost = 0;
           size_t chosen_request = 0;
-          tie(op_cost, chosen_request) = ConversionCost(input_schemes, input_entries,
-                                                        output_schemes, output_entries,
-                                                        op.aligned_requests);
+          tie(op_cost, chosen_request) = ConversionCost(op, &prev_state, &next_state, i);
           state_cost += op_cost;
           op_requests.push_back(chosen_request);
         }
@@ -551,10 +492,66 @@ void CutAlgorithm::OneCut() {
   // TODO
 
   // Extract the optimal plan.
-  ExtractOptimalPlan();
+  return ExtractOptimalPlan();
 }
 
-void CutAlgorithm::ExtractOptimalPlan() {
+pair<cost_t, size_t> CutAlgorithm::ConversionCost(
+    const DPOp& op,
+    const DPState* prev_state,
+    const DPState* next_state,
+    size_t lvl) const {
+  //LOG(INFO) << src_graph_->indexed_graph()[op.node_id].source->attrs.name;
+  const vector<Scheme>* prev_schemes = (prev_state)? &prev_state->schemes : nullptr;
+  const vector<Scheme>* next_schemes = (next_state)? &next_state->schemes : nullptr;
+  const vector<DPEntry>* prev_entries = (lvl > 0)? &dp_entries_[lvl-1] : nullptr;
+  const vector<DPEntry>* next_entries = (lvl < dp_entries_.size())? &dp_entries_[lvl] : nullptr;
+  // Extract schemes for inputs and outputs of the op.
+  const vector<const Scheme*>& input_schemes =
+    ExtractFromIndex<Scheme>(op.input_entry_index, prev_schemes, next_schemes, lvl);
+  const vector<const Scheme*>& output_schemes =
+    ExtractFromIndex<Scheme>(op.output_entry_index, prev_schemes, next_schemes, lvl);
+  // Extract entries for inputs and outputs of the op.
+  const vector<const DPEntry*>& input_entries =
+    ExtractFromIndex<DPEntry>(op.input_entry_index, prev_entries, next_entries, lvl);
+  const vector<const DPEntry*>& output_entries =
+    ExtractFromIndex<DPEntry>(op.output_entry_index, prev_entries, next_entries, lvl);
+  const vector<SchemeRequest>& aligned_requests = op.aligned_requests;
+  CHECK_EQ(input_schemes.size(), input_entries.size());
+  CHECK_EQ(input_schemes.size(), op.input_ghost_regions.size());
+  CHECK_EQ(output_schemes.size(), output_entries.size());
+  CHECK_EQ(output_schemes.size(), op.output_ghost_regions.size());
+  CHECK_GT(aligned_requests.size(), 0);
+  cost_t cost = std::numeric_limits<cost_t>::max();
+  size_t req_idx = 0;
+  for (size_t i = 0; i < aligned_requests.size(); ++i) {
+    const SchemeRequest& req = aligned_requests[i];
+    CHECK_EQ(input_schemes.size(), req.input_schemes.size());
+    CHECK_EQ(output_schemes.size(), req.output_schemes.size());
+    cost_t req_cost = 0;
+    // Input conversion cost.
+    for (size_t j = 0; j < input_schemes.size(); ++j) {
+      req_cost += Region::ConvertCost2(input_entries[j]->region,
+                                       *input_schemes[j],
+                                       op.input_ghost_regions[j],
+                                       req.input_schemes[j]);
+    }
+    // Output conversion cost.
+    for (size_t j = 0; j < output_schemes.size(); ++j) {
+      req_cost += Region::ConvertCost2(op.output_ghost_regions[j],
+                                       req.output_schemes[j],
+                                       output_entries[j]->region,
+                                       *output_schemes[j]);
+    }
+    // Save the minimal cost.
+    if (req_cost < cost) {
+      cost = req_cost;
+      req_idx = i;
+    }
+  }
+  return make_pair(cost, req_idx);
+}
+
+cost_t CutAlgorithm::ExtractOptimalPlan() {
   size_t num_levels = dp_states_.size();
   cost_t min_cost = std::numeric_limits<cost_t>::max();
   DPState* min_state = nullptr;
@@ -567,15 +564,25 @@ void CutAlgorithm::ExtractOptimalPlan() {
   LOG(INFO) << "Min cost: " << min_cost;
   for (int i = dp_states_.size() - 1; i >= 0; --i) {
     CHECK_EQ(dp_entries_[i].size(), min_state->schemes.size());
+    CHECK_EQ(dp_operators_[i].size(), min_state->chosen_aligned_requests.size());
+    // Record best scheme for each entry.
     for (size_t j = 0; j < dp_entries_[i].size(); ++j) {
       dp_entries_[i][j].chosen_schemes.push_back(
           min_state->schemes[j]);
     }
-    // TODO operator requests (attention for variable node).
+    // Record best aligned request for each operator. Variable operator will be ignored.
+    for (size_t j = 0; j < dp_operators_[i].size(); ++j) {
+      if (!IsVariable(dp_operators_[i][j])) {
+        dp_operators_[i][j].chosen_aligned_requests.push_back(
+            min_state->chosen_aligned_requests[j]);
+      }
+    }
     if (i > 0) {
       min_state = &dp_states_[i-1][min_state->prev_state_index];
     }
   }
+  // TODO handle situation where the last BFS level is an operator level.
+  return min_cost;
 }
 
 void CutAlgorithm::Print() const {
@@ -597,9 +604,9 @@ void CutAlgorithm::Print() const {
         ostringstream oss;
         oss << "\t{";
         for (const uint32_t entid : (*bfs_.entry_groups_)[groupid]) {
-          oss << "#" << entid << ": " << shapes[entid] << ", ";
+          oss << "#" << entid << " ";
         }
-        oss << "}, [";
+        oss << "}, " << dp_ent.region << "[";
         for (const Scheme& sch : dp_ent.chosen_schemes) {
           oss << sch << " ";
         }
@@ -609,6 +616,55 @@ void CutAlgorithm::Print() const {
       LOG(INFO) << "]";
     }
   }
+}
+
+// K-cut algorithm.
+cost_t CutAlgorithm::KCuts(uint32_t K) {
+  if (K == 0) {
+    return 0;
+  }
+  // Compute one-cut.
+  cost_t cut_cost = OneCut();
+  // Prune entry regions.
+  for (auto& ent_lvl : dp_entries_) {
+    for (DPEntry& ent : ent_lvl) {
+      const Scheme& cur_sch = ent.chosen_schemes[ent.chosen_schemes.size() - 1];
+      ent.region = ent.region.Split2(cur_sch).first;
+    }
+  }
+  // Compute ghost regions.
+  for (auto& op_lvl : dp_operators_) {
+    for (DPOp& op : op_lvl) {
+      if (IsVariable(op)) {
+        // For variable operator, all schemes are aligned. In fact, the ghost area is not
+        // being considered when computing the conversion cost (the cost is always zero).
+        // Therefore, no need to compute ghost regions for this.
+        continue;
+      }
+      size_t cur_req = op.chosen_aligned_requests[op.chosen_aligned_requests.size() - 1];
+      const SchemeRequest& req = op.aligned_requests[cur_req];
+      CHECK_LT(cur_req, op.aligned_requests.size());
+      // Inputs.
+      for (size_t i = 0; i < op.input_ghost_regions.size(); ++i) {
+        op.input_ghost_regions[i] = op.input_ghost_regions[i].Split2(
+            req.input_schemes[i]).first;
+      }
+      // Outputs.
+      for (size_t i = 0; i < op.output_ghost_regions.size(); ++i) {
+        const Scheme& out_sch = req.output_schemes[i];
+        if (out_sch.type != Scheme::kRed) {
+          // The ghost area of the Reduction scheme is unchanged. Otherwise, split
+          // the ghost area to form the new one.
+          op.output_ghost_regions[i] =
+            op.output_ghost_regions[i].Split2(out_sch).first;
+        }
+      }
+    }
+  }
+  //LOG(INFO) << "!!!!!!!!!!!!!!!!!!!!!!!After prune";
+  //Print();
+  // Compute (k-1)-cut.
+  return cut_cost + 2 * KCuts(K - 1);
 }
 
 }  // namespace pass

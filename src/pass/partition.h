@@ -138,7 +138,6 @@ class Region {
 struct DPEntry {
   uint32_t entry_group_id;
   Region region;
-  Region ghost_region;
   // Recorded optimal schemes for each one-cut algorithm.
   std::vector<Scheme> chosen_schemes;
 };
@@ -148,6 +147,8 @@ struct DPOp {
   std::vector<BFS::Index> input_entry_index;
   std::vector<BFS::Index> output_entry_index;
   std::vector<SchemeRequest> aligned_requests;
+  std::vector<Region> input_ghost_regions;
+  std::vector<Region> output_ghost_regions;
   // Recorded optimal request for each one-cut algorithm.
   std::vector<size_t> chosen_aligned_requests;
 };
@@ -171,11 +172,11 @@ class CutAlgorithm {
   // Constructor.
   CutAlgorithm(Graph* src, const BFS& bfs);
 
-  // One cut algorithm.
-  void OneCut();
+  // One cut algorithm. Return the minimal cost.
+  cost_t OneCut();
 
-  // K-cut algorithm.
-  void KCuts(uint32_t K);
+  // K-cut algorithm. Return the minimal cost.
+  cost_t KCuts(uint32_t K);
 
   // Get schemes of a node entry.
   const std::vector<Scheme>& GetEntryScheme(uint32_t entry_id) const;
@@ -194,9 +195,16 @@ class CutAlgorithm {
     return src_graph_->indexed_graph()[op.node_id].source->is_variable();
   }
 
+  std::pair<cost_t, size_t> ConversionCost(
+      const DPOp& op,
+      const DPState* prev_state,
+      const DPState* next_state,
+      size_t lvl) const;
+
   // Extract optimal plan from the states computed by one-cut algorithm. The plan includes
   // schemes of each node entry and which aligned request is used for each node.
-  void ExtractOptimalPlan();
+  // Return the minimal cost.
+  cost_t ExtractOptimalPlan();
 
   Graph* src_graph_;
   const BFS& bfs_;
