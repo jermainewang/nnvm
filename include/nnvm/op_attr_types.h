@@ -134,48 +134,6 @@ using FGradient = std::function<std::vector<NodeEntry>(
     const NodePtr& nodeptr,
     const std::vector<NodeEntry>& out_grads)>;
 
-// Attributes used in operator partition.
-struct Scheme {
-  enum SchemeType {
-    kCut = 0,
-    kRep,
-    kRed,
-  };
-  // Scheme type.
-  SchemeType type = kRep;
-  // If type == kCut, this will be used to indicate which dimension is required
-  // to be splitted. Otherwise, this is equal to -1.
-  int dim = -1;
-
-  Scheme() {}
-  Scheme(SchemeType type, int dim): type(type), dim(dim) {}
-  // Creator for cut on given dimension.
-  static Scheme Cut(int dim) {
-    return Scheme(kCut, dim);
-  }
-  static Scheme Rep() {
-    return Scheme(kRep, -1);
-  }
-  static Scheme Red() {
-    return Scheme(kRed, -1);
-  }
-};
-
-struct SchemeRequest {
-  std::vector<Scheme> input_schemes;
-  std::vector<Scheme> output_schemes;
-  SchemeRequest() {}
-  SchemeRequest(const std::vector<Scheme>& in_sch,
-                const std::vector<Scheme>& out_sch):
-    input_schemes(in_sch), output_schemes(out_sch)
-  {}
-};
-
-using FAlignedSchemes = std::function<std::vector<SchemeRequest>(
-    const NodeAttrs& attrs,
-    const std::vector<TShape>& input_shapes,
-    const std::vector<TShape>& output_shapes)>;
-
 }  // namespace nnvm
 
 #endif  // NNVM_OP_ATTR_TYPES_H_

@@ -67,17 +67,23 @@ Graph PartitionPass(Graph src) {
   NodeEntryGroups groups(graph.num_node_entries(), equal);
 
   // Call BFS.
-  BFS bfs(&src, &groups);
-  bfs.Run(start_node_id);
-  bfs.Print();
+  //BFS bfs(&src, &groups);
+  //bfs.Run(start_node_id);
+  //bfs.Print();
+
+  NeuralLevels nnlvls(&src, &groups);
+  nnlvls.Run();
+  nnlvls.Print();
 
   // Cut algorithm.
-  CutAlgorithm algo(&src, bfs);
-  //algo.OneCut();
-  //algo.Print();
+  CutAlgorithm algo(&src, nnlvls, groups);
   cost_t total_cost = algo.KCuts(3);
   algo.Print();
   LOG(INFO) << "Total K-cuts cost: " << total_cost;
+
+  // Graph partitioner.
+  GraphPartitioner pttn(algo, &src);
+  pttn.Run(3);
 
   return src;
 }

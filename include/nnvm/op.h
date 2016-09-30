@@ -232,13 +232,13 @@ class Op {
   template<typename ValueType>
   static const OpMap<ValueType>& GetAttr(const std::string& attr_name);
 
+  uint32_t index_{0};
  private:
   template<typename ValueType>
   friend class OpMap;
   friend class dmlc::Registry<Op>;
   // Program internal unique index of operator.
   // Used to help index the program.
-  uint32_t index_{0};
   // internal constructor
   Op();
   // get const reference to certain attribute
@@ -275,6 +275,8 @@ class OpMap {
    * \return 1 if op is contained in map, 0 otherwise.
    */
   inline int count(const Op* op) const;
+
+  inline int size() const { return data_.size(); }
 
  private:
   friend class Op;
@@ -347,15 +349,16 @@ inline Op& Op::set_attr(  // NOLINT(*)
           << " current " << typeid(OpMap<ValueType>).name();
       std::vector<std::pair<ValueType, int> >& vec =
           nnvm::get<OpMap<ValueType> >(*pmap).data_;
-      // resize the value type.
-      vec.resize(index_ + 1,
-                 std::make_pair(ValueType(), 0));
+      if (index_ >= vec.size()) {
+        // Resize the vector to make room.
+        vec.resize(index_ + 1, std::make_pair(ValueType(), 0));
+      }
       std::pair<ValueType, int>& p = vec[index_];
       CHECK(p.second == 0)
           << "Attribute " << attr_name
           << " of operator " << this->name
           << " is already registered.";
-          vec[index_] = std::make_pair(value, 1);
+      p = std::make_pair(value, 1);
     });
   return *this;
 }

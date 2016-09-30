@@ -10,6 +10,7 @@
 #include <nnvm/graph.h>
 #include <nnvm/graph_attr_types.h>
 #include <nnvm/op_attr_types.h>
+#include <nnvm/scheme.h>
 #include <algorithm>
 #include <queue>
 #include <sstream>
@@ -19,6 +20,7 @@ namespace pass {
 
 class CutAlgorithm;
 
+// TODO(minjie): how to deal with value overflow?
 typedef int64_t cost_t;
 
 class NodeEntryGroups {
@@ -44,53 +46,107 @@ class NodeEntryGroups {
   std::unordered_map<uint32_t, uint32_t> entry2group_;
 };
 
-class BFS {
-  // The stored nodes and entries are represented by ids in IndexedGraph.
-  // Note: This BFS does not consider control dependencies between nodes.
-  friend class CutAlgorithm;
+class Levels {
  public:
   // Pair: (levelid, index_within_level).
   typedef std::pair<uint32_t, uint32_t> Index;
 
+  Levels(const NodeEntryGroups* groups): entry_groups_(groups) {}
+
+  inline size_t NumNodeLevels() const {
+    return node_levels_.size();
+  }
+
+  inline size_t NumEntryGroupLevels() const {
+    return entry_group_levels_.size();
+  }
+
+  inline const std::vector<uint32_t>& GetNodeLevel(size_t lvl) const {
+    return node_levels_[lvl];
+  }
+
+  inline const std::vector<uint32_t>& GetEntryGroupLevel(size_t lvl) const {
+    return entry_group_levels_[lvl];
+  }
+
+  inline Index GetNodeIndex(uint32_t nodeid) const {
+    return node2index_.at(nodeid);
+  }
+
+  inline Index GetNodeEntryIndex(uint32_t entry_id) const {
+    return entry2index_.at(entry_id);
+  }
+
+  virtual bool AllowCrossLevelEdges() const = 0;
+
+ protected:
+  void AddNode(uint32_t levelid, uint32_t nodeid);
+
+  void AddNodeEntry(uint32_t levelid, uint32_t entry_id);
+
+  // Pointer to the node entry groups (no ownership).
+  const NodeEntryGroups* entry_groups_;
+
+  std::vector<std::vector<uint32_t>> node_levels_;
+  std::vector<std::vector<uint32_t>> entry_group_levels_;
+
+  std::unordered_map<uint32_t, Levels::Index> node2index_;
+  std::unordered_map<uint32_t, Levels::Index> entry2index_;
+};
+
+class BFS : public Levels {
+  // The stored nodes and entries are represented by ids in IndexedGraph.
+  // Note: This BFS does not consider control dependencies between nodes.
+ public:
   // Constructor.
   BFS(Graph* src, const NodeEntryGroups* groups);
 
   // Run BFS from the given start node. Treat graph as undirected one.
   void Run(uint32_t start_node_id);
- 
-  inline Index GetNodeBFSIndex(uint32_t nodeid) const {
-    return node2index_.at(nodeid);
-  }
-
-  inline Index GetNodeEntryBFSIndex(uint32_t entry_id) const {
-    return entry2index_.at(entry_id);
-  }
 
   // Print graph in a readable way.
   void Print() const;
+
+  inline bool AllowCrossLevelEdges() const override { return false; }
   
  private:
-  void AddNode(uint32_t levelid, uint32_t nodeid);
-
-  void AddNodeEntry(uint32_t levelid, uint32_t entry_id);
-
   // Pointer to the source graph (no ownership).
   Graph* src_graph_;
-  const NodeEntryGroups* entry_groups_;
+
+  // Entry to all its producer/consumer nodes.
+  std::vector<std::unordered_set<uint32_t>> entry_to_nodes_;
+  // Node to all its input/output nodes.
+  std::vector<std::unordered_set<uint32_t>> node_to_entries_;
+};
+
+class NeuralLevels : public Levels {
+  // Construct node and entry levels by the neural network layers.
+ public:
+  // Constructor.
+  NeuralLevels(Graph* src, const NodeEntryGroups* groups);
+
+  void Run();
+
+  // Print graph in a readable way.
+  void Print() const;
+
+  inline bool AllowCrossLevelEdges() const override { return true; }
+
+ private:
+  // Pointer to the source graph (no ownership).
+  Graph* src_graph_;
+
+  // Nodes that have the same name prefix (but not start with "_") will be put in the same group.
+  // Nodes from the same group will be put in the same level.
+  std::vector<std::vector<uint32_t>> node_groups_;
+  std::vector<size_t> nodeid2group_;
+  std::vector<size_t> group_topo_order_;
 
   // Entry to all its producer/consumer nodes.
   std::vector<std::unordered_set<uint32_t>> entry_to_nodes_;
   // Node to all its input/output nodes.
   std::vector<std::unordered_set<uint32_t>> node_to_entries_;
 
-  // BFS levels.
-  // All NodeEntries (both inputs/outputs) of Node in level i should be found
-  // in entry level (i - 1) and (i).
-  std::vector<std::vector<uint32_t>> node_levels_;
-  std::vector<std::vector<uint32_t>> entry_group_levels_;
-
-  std::unordered_map<uint32_t, Index> node2index_;
-  std::unordered_map<uint32_t, Index> entry2index_;
 };
 
 class Region {
@@ -116,6 +172,9 @@ class Region {
 
   // Partition this region into two sub-regions.
   std::pair<Region, Region> Split2(const Scheme& sch) const;
+
+  // Return true if the region could be splitted using the given scheme.
+  bool CanSplit2(const Scheme& sch) const;
 
   // Area of the region.
   inline cost_t Area() const { return region_shape_.Size(); }
@@ -144,8 +203,8 @@ struct DPEntry {
 
 struct DPOp {
   uint32_t node_id;
-  std::vector<BFS::Index> input_entry_index;
-  std::vector<BFS::Index> output_entry_index;
+  std::vector<Levels::Index> input_entry_index;
+  std::vector<Levels::Index> output_entry_index;
   std::vector<SchemeRequest> aligned_requests;
   std::vector<Region> input_ghost_regions;
   std::vector<Region> output_ghost_regions;
@@ -170,7 +229,7 @@ struct DPState {
 class CutAlgorithm {
  public:
   // Constructor.
-  CutAlgorithm(Graph* src, const BFS& bfs);
+  CutAlgorithm(Graph* src, const Levels& levels, const NodeEntryGroups& groups);
 
   // One cut algorithm. Return the minimal cost.
   cost_t OneCut();
@@ -179,7 +238,13 @@ class CutAlgorithm {
   cost_t KCuts(uint32_t K);
 
   // Get schemes of a node entry.
-  const std::vector<Scheme>& GetEntryScheme(uint32_t entry_id) const;
+  const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const;
+  
+  // Get scheme requests of the given node.
+  const std::vector<SchemeRequest>& GetSchemeRequests(uint32_t node_id) const;
+
+  // Get scheme requests chosen for the given node.
+  const std::vector<size_t>& GetChosenSchemeRequests(uint32_t node_id) const;
 
   // Print debug information.
   void Print() const;
@@ -207,7 +272,8 @@ class CutAlgorithm {
   cost_t ExtractOptimalPlan();
 
   Graph* src_graph_;
-  const BFS& bfs_;
+  const Levels& levels_;
+  const NodeEntryGroups& entry_groups_;
 
   std::vector<std::vector<DPOp>> dp_operators_;
   std::vector<std::vector<DPEntry>> dp_entries_;
@@ -215,7 +281,106 @@ class CutAlgorithm {
   std::vector<std::vector<DPState>> dp_states_;
 };
 
+// A structure that represents a subtensor.
+struct Block {
+  // Index within grid.
+  TShape index;
+  // Replication index.
+  uint32_t replication_id = 0;
+  // Device group.
+  uint32_t device_group_id = 0;
+  // NodeEntry of this block.
+  NodeEntry entry;
+};
+
+// A structure that represents a tensor that is partitioned as a grid of blocks(subtensors).
+class Grid {
+ public:
+  typedef std::function<void(const Block& from, const std::vector<Block*>& to)> SplitFn;
+  typedef std::function<void(const std::vector<const Block*>& from, Block* to)> ConcatFn;
+  // Create grid from the partition schemes and the given shape. The NodeEntry of this
+  // grid will not be initialized. If the given scheme vector is empty, the grid
+  // will only consists of one block.
+  Grid(const TShape& shape, const std::vector<Scheme>& schemes);
+
+  const TShape& shape() const { return shape_; }
+
+  const TShape& block_shape() const { return block_shape_; }
+
+  const TShape& num_blocks() const { return num_blocks_; }
+
+  uint32_t num_replicates() const { return num_replicates_; }
+
+  bool replicate_is_reduction() const { return replicate_is_reduction_; }
+
+  const std::vector<std::pair<Scheme, size_t>>& schemes() const { return schemes_; }
+
+  size_t TotalNumBlocks() const { return blocks_.size(); }
+
+  Block& BlockAt(size_t i) { return blocks_[i]; }
+  const Block& BlockAt(size_t i) const { return blocks_[i]; }
+
+  void PushScheme(const Scheme& sch, size_t num_splits, SplitFn splitfn = nullptr);
+
+  std::pair<Scheme, size_t> PopScheme(ConcatFn concatfn = nullptr);
+
+ private:
+  std::vector<std::pair<Scheme, size_t>> schemes_;
+  // Shape of the tensor represented by this grid.
+  TShape shape_;
+  // Shape of the blocks. All blocks are of the same shape.
+  TShape block_shape_;
+  // Number of blocks(subtensors) on each dimension.
+  TShape num_blocks_;
+  // Number of replicates (or reductions).
+  uint32_t num_replicates_ = 1;
+  // If true, the replication actually represents tensors to be reduced.
+  bool replicate_is_reduction_ = false;
+
+  // A vector representation of all the blocks. It also acts as the map from
+  // device_group_id to the block. For example, to get a block under
+  // device_group_id=3, just use blocks[3].
+  std::vector<Block> blocks_;
+};
+
+class GraphPartitioner {
+ public:
+  GraphPartitioner(const CutAlgorithm& algo, Graph* src): algo_(algo), src_graph_(src) {}
+
+  Graph Run(uint32_t K);
+
+ private:
+  std::vector<NodeEntry> SplitEntry(const NodeEntry& from, const std::string& name,
+                                    size_t num_args, size_t dim);
+
+  NodeEntry ConcatEntry(const std::vector<NodeEntry>& from, const std::string& name,
+                        size_t dim);
+
+  void AllReduceBlocks(const std::vector<const Block*>& inputs,
+                       const std::vector<Block*>& outputs);
+
+  void AllShuffleBlocks(const std::vector<const Block*>& inputs,
+                        const std::vector<Block*>& outputs);
+
+  void AllReduce(const Grid& input, Grid* output);
+
+  // Create conversion operations between two grids. The conversion happens in three
+  // phases: split; allreduce/shuffle; concat.
+  void ConvertGrid(const Grid& from, Grid* to);
+
+  // Connect the input grids and output grids by operators. It follows the idea of
+  // recursive-partitionable operator.
+  // Note that the input grids could be empty, in which the given operator should
+  // also be nullptr. This means the operator is a variable operation.
+  void PerformOp(const std::vector<const Grid*>& inputs,
+                 const std::vector<Grid*>& outputs,
+                 const std::vector<NodePtr>& nodes);
+
+  const CutAlgorithm& algo_;
+  Graph* src_graph_;
+};
+
 }  // namespace pass
 }  // namespace nnvm
 
-#endif
+#endif  // NNVM_PASS_PARTITION_H_
