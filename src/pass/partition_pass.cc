@@ -73,17 +73,17 @@ Graph PartitionPass(Graph src) {
 
   NeuralLevels nnlvls(&src, &groups);
   nnlvls.Run();
-  nnlvls.Print();
+  //nnlvls.Print();
 
   // Cut algorithm.
   CutAlgorithm algo(&src, nnlvls, groups);
-  cost_t total_cost = algo.KCuts(1);
+  cost_t total_cost = algo.KCuts(3);
   algo.Print();
   LOG(INFO) << "Total K-cuts cost: " << total_cost;
 
   // Graph partitioner.
   GraphPartitioner pttn(algo, &src);
-  pttn.Run(1);
+  pttn.Run();
 
   return src;
 }

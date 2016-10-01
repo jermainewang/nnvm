@@ -296,8 +296,10 @@ struct Block {
 // A structure that represents a tensor that is partitioned as a grid of blocks(subtensors).
 class Grid {
  public:
-  typedef std::function<void(const Block& from, const std::vector<Block*>& to)> SplitFn;
-  typedef std::function<void(const std::vector<const Block*>& from, Block* to)> ConcatFn;
+  typedef std::function<void(const Block& from, const TShape& from_shape,
+                             const std::vector<Block*>& to, const TShape& to_shape)> SplitFn;
+  typedef std::function<void(const std::vector<const Block*>& from, const TShape& from_shape,
+                             Block* to, const TShape& to_shape)> ConcatFn;
   // Create grid from the partition schemes and the given shape. The NodeEntry of this
   // grid will not be initialized. If the given scheme vector is empty, the grid
   // will only consists of one block.
@@ -347,17 +349,19 @@ class GraphPartitioner {
  public:
   GraphPartitioner(const CutAlgorithm& algo, Graph* src): algo_(algo), src_graph_(src) {}
 
-  Graph Run(uint32_t K);
+  Graph Run();
 
  private:
-  std::vector<NodeEntry> SplitEntry(const NodeEntry& from, const std::string& name,
-                                    size_t num_args, size_t dim);
+  std::vector<NodeEntry> SplitEntry(const NodeEntry& from, const TShape& ret_shape,
+                                    const std::string& name, size_t num_args, size_t dim);
 
-  NodeEntry ConcatEntry(const std::vector<NodeEntry>& from, const std::string& name,
-                        size_t dim);
+  NodeEntry ConcatEntry(const std::vector<NodeEntry>& from,
+                        const TShape& ret_shape,
+                        const std::string& name, size_t dim);
 
   void AllReduceBlocks(const std::vector<const Block*>& inputs,
-                       const std::vector<Block*>& outputs);
+                       const std::vector<Block*>& outputs,
+                       const TShape& shape);
 
   void AllShuffleBlocks(const std::vector<const Block*>& inputs,
                         const std::vector<Block*>& outputs);
@@ -378,6 +382,8 @@ class GraphPartitioner {
 
   const CutAlgorithm& algo_;
   Graph* src_graph_;
+
+  std::unordered_map<const Node*, std::vector<TShape>> node_output_shapes_;
 };
 
 }  // namespace pass
