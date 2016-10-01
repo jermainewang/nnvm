@@ -1103,7 +1103,7 @@ pair<Scheme, size_t> Grid::PopScheme(Grid::ConcatFn concatfn) {
 vector<NodeEntry> GraphPartitioner::SplitEntry(
     const NodeEntry& from, const std::string& name,
     size_t num_args, size_t dim) {
-  CHECK_LT(num_args, 0);
+  CHECK_GT(num_args, 0);
   if (num_args == 1) {
     // Split operation is not needed.
     return {from};
@@ -1120,7 +1120,7 @@ vector<NodeEntry> GraphPartitioner::SplitEntry(
   node->attrs.name = oss.str();
   node->attrs.dict["num_args"] = std::to_string(num_args);
   node->attrs.dict["dim"] = std::to_string(dim);
-  // TODO: node->parsed?
+  node->attrs.op->attr_parser(&(node->attrs));
   vector<NodeEntry> ret;
   for (uint32_t i = 0; i < num_args; ++i) {
     ret.push_back(NodeEntry{node, i, 0});
@@ -1143,7 +1143,7 @@ NodeEntry GraphPartitioner::ConcatEntry(
   node->attrs.op = concat_op;
   node->attrs.dict["num_args"] = std::to_string(from.size());
   node->attrs.dict["dim"] = std::to_string(dim);
-  // TODO: node->parsed?
+  node->attrs.op->attr_parser(&(node->attrs));
   NodeEntry to{node, 0, 0};
   // Concat op name.
   ostringstream oss;
@@ -1156,7 +1156,7 @@ void GraphPartitioner::AllReduceBlocks(
     const vector<const Block*>& inputs, const vector<Block*>& outputs) {
   CHECK_GT(inputs.size(), 1);
   // TODO: context map
-  const Op* sum_op = Op::Get("__ewise_sum__");
+  const Op* sum_op = Op::Get("ElementWiseSum");
   // Split for balanced allreduce.
   vector<vector<NodeEntry>> splitted(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
@@ -1167,14 +1167,13 @@ void GraphPartitioner::AllReduceBlocks(
   for (size_t i = 0; i < outputs.size(); ++i) {
     NodePtr sum_node = Node::Create();
     sum_node->attrs.op = sum_op;
+    sum_node->attrs.name = "__allreduce";
+    sum_node->attrs.dict["num_args"] = std::to_string(inputs.size());
+    sum_node->attrs.op->attr_parser(&(sum_node->attrs));
     for (size_t j = 0; j < inputs.size(); ++j) {
       sum_node->inputs.push_back(splitted[j][i]);
     }
     reduced[i] = NodeEntry{sum_node, 0, 0};
-    // Sum node name.
-    ostringstream oss;
-    oss << "__allreduce";
-    sum_node->attrs.name = oss.str();
   }
   // Concat.
   for (size_t i = 0; i < outputs.size(); ++i) {
@@ -1204,7 +1203,7 @@ void GraphPartitioner::AllShuffleBlocks(
 }
 
 void GraphPartitioner::AllReduce(const Grid& input, Grid* output) {
-  CHECK_LT(input.TotalNumBlocks(), 0);
+  CHECK_GT(input.TotalNumBlocks(), 0);
   CHECK_EQ(input.num_blocks(), output->num_blocks());
   GridIndexMap ingrid_idx(input), outgrid_idx(*output);
   IndexIter iter(input.num_blocks());
@@ -1341,15 +1340,15 @@ Graph GraphPartitioner::Run(uint32_t K) {
     entry_grids.emplace_back(shape, schemes);
   }
   for (uint32_t nodeid = 0; nodeid < graph.num_nodes(); ++nodeid) {
-    LOG(INFO) << "Split node#" << nodeid;
     const Node* node = graph[nodeid].source;
+    LOG(INFO) << "Split node#" << nodeid << ": " << node->attrs.name;
     if (node->is_variable()) {
       // Variable node does not have input/output grid because it is always
       // aligned. A series of special split operations will be inserted after
       // each variable node to dispatch blocks to different devices.
       const uint32_t out_ent_id = graph.entry_id(nodeid, 0);
       // Create splitted nodes.
-      // TODO: node->attrs.parsed ? ; version ?
+      // TODO: version ?
       // TODO: context map
       for (size_t i = 0; i < entry_grids[out_ent_id].TotalNumBlocks(); ++i) {
         NodePtr newnode = Node::Create();
@@ -1373,7 +1372,7 @@ Graph GraphPartitioner::Run(uint32_t K) {
       }
     }
     vector<Grid> input_grids, output_grids;
-    CHECK_EQ(node->num_inputs(), num_inputs);
+    CHECK_EQ(node->inputs.size(), num_inputs);
     CHECK_EQ(node->num_outputs(), num_outputs);
     for (size_t i = 0; i < num_inputs; ++i) {
       const uint32_t in_ent_id = graph.entry_id(node->inputs[i]);
@@ -1419,11 +1418,12 @@ Graph GraphPartitioner::Run(uint32_t K) {
       return;
     }
     // Convert input grids.
-    vector<const Grid*> aligned_ingrid(node->num_inputs());
-    for (size_t i = 0; i < node->num_inputs(); ++i) {
+    vector<const Grid*> aligned_ingrid(node->inputs.size());
+    for (size_t i = 0; i < node->inputs.size(); ++i) {
       const uint32_t in_ent_id = graph.entry_id(node->inputs[i]);
       const Grid& ingrid = entry_grids[in_ent_id];
       Grid& aligned = op_input_grids[nodeid][i];
+      LOG(INFO) << "\tConvert input #" << i;
       ConvertGrid(ingrid, &aligned);
       aligned_ingrid[i] = &aligned;
     }
@@ -1435,10 +1435,12 @@ Graph GraphPartitioner::Run(uint32_t K) {
       aligned_outgrid[i] = &op_output_grids[nodeid][i];
     }
 
+    LOG(INFO) << "\tPerform op";
     PerformOp(aligned_ingrid, aligned_outgrid, splitted_nodes[nodeid]);
 
     // Convert output grids.
     for (size_t i = 0; i < node->num_outputs(); ++i) {
+      LOG(INFO) << "\tConvert output #" << i;
       ConvertGrid(*aligned_outgrid[i], outgrid[i]);
     }
   });
@@ -1451,7 +1453,9 @@ Graph GraphPartitioner::Run(uint32_t K) {
       ret.outputs.push_back(std::move(entry_grids[entid].BlockAt(i).entry));
     }
   }
+  const IndexedGraph& retgraph = ret.indexed_graph();
   // TODO: new shape vector.
+  ShapeVector new_shapes(retgraph.num_node_entries());
   
   DFSVisit(ret.outputs, [&](const NodePtr& node) {
     LOG(INFO) << node->attrs.name;
