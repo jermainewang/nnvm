@@ -77,7 +77,7 @@ Graph PartitionPass(Graph src) {
 
   // Cut algorithm.
   CutAlgorithm algo(&src, nnlvls, groups);
-  cost_t total_cost = algo.KCuts(3);
+  cost_t total_cost = algo.KCuts(1);
   algo.Print();
   LOG(INFO) << "Total K-cuts cost: " << total_cost;
 

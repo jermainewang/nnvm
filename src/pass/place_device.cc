@@ -34,50 +34,64 @@ Graph PlaceDevice(Graph src) {
     device.resize(idx.num_nodes(), -1);
   }
 
-  // forward pass
+  // Attempt #1: Place node by its given group or its input entry.
   for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
     const auto& inode = idx[nid];
     auto it = inode.source->attrs.dict.find(device_group_attr_key);
     if (it != inode.source->attrs.dict.end()) {
+      // If the node has group name in the attribute, then place this node
+      // on the device associated with that group.
       const std::string& device_group = it->second;
       auto dit = device_assign_map.find(device_group);
       CHECK_NE(dit, device_assign_map.end())
           << "The device assignment not found for group " << device_group;
       device[nid] = dit->second;
     } else {
+      // Search its input entries. Place the node together with any of
+      // its input entry.
       for (const IndexedGraph::NodeEntry& e : inode.inputs) {
         if (device[e.node_id] != -1) {
-          device[nid] = device[e.node_id]; break;
+          device[nid] = device[e.node_id];
+          break;
         }
       }
     }
   }
-  // backward pass
-  for (uint32_t i = idx.num_nodes(); i != 0; --i) {
-    uint32_t nid = i - 1;
-    const auto& inode = idx[nid];
-    if (device[nid] == -1) continue;
+  // Attempt #2: Place node by its output entry.
+  for (int nid = idx.num_nodes() - 1; nid >= 0; --nid) {
+    const IndexedGraph::Node& inode = idx[nid];
+    if (device[nid] == -1) {
+      // If the placement of this node is unknown, we could not place its
+      // input node according to it.
+      continue;
+    }
     for (const IndexedGraph::NodeEntry& e : inode.inputs) {
-      if (device[e.node_id] == -1) device[e.node_id] = device[nid];
+      if (device[e.node_id] == -1) {
+        // If any of its input node is not placed, place it together with
+        // the currrent node.
+        device[e.node_id] = device[nid];
+      }
+    }
+  }
+  // Final attempt: Place all other unknown nodes to device 0.
+  bool has_multiple_device = false;
+  for (uint32_t nodeid = 0; nodeid < idx.num_nodes(); ++nodeid) {
+    if (device[nodeid] == -1) {
+      device[nodeid] = 0;
+    }
+    if (device[nodeid] != device[0]) {
+      has_multiple_device = true;
     }
   }
 
-  int num_dev = 1, other_dev_id = -1;
-  for (int& dev : device) {
-    if (dev == -1) dev = 0;
-    if (dev != other_dev_id) {
-      if (other_dev_id != -1) ++num_dev;
-      other_dev_id = dev;
-    }
-  }
-
-  if (num_dev == 1) {
+  if (!has_multiple_device) {
     src.attrs.erase("device_group_attr_key");
     src.attrs.erase("device_assign_map");
     src.attrs.erase("device_copy_op");
     src.attrs["device"] = std::make_shared<any>(std::move(device));
     return src;
   }
+
   std::map<std::tuple<uint32_t, uint32_t, int>, NodePtr> copy_map;
   std::vector<NodePtr> new_node_map(idx.num_nodes(), nullptr);
   std::unordered_map<const Node*, int> new_device_map;

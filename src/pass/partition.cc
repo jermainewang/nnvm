@@ -5,6 +5,7 @@
  */
 
 #include "./partition.h"
+#include <nnvm/symbolic.h>
 
 using namespace std;
 
@@ -230,6 +231,10 @@ inline void FinalizeNodeCreation(NodePtr node) {
   if (node->attrs.op && node->attrs.op->attr_parser) {
     node->attrs.op->attr_parser(&(node->attrs));
   }
+}
+
+inline void AssignDevice(NodePtr node, size_t device_group_id) {
+  node->attrs.dict["ctx_group"] = "gpu:" + std::to_string(device_group_id);
 }
 
 }  // namespace
@@ -1117,14 +1122,14 @@ pair<Scheme, size_t> Grid::PopScheme(Grid::ConcatFn concatfn) {
 vector<NodeEntry> GraphPartitioner::SplitEntry(
     const NodeEntry& from, const TShape& ret_shape,
     const std::string& name,
-    size_t num_args, size_t dim) {
+    size_t num_args, size_t dim,
+    size_t device_group_id) {
   CHECK_GT(num_args, 0);
   CHECK_LT(dim, ret_shape.ndim());
   if (num_args == 1) {
     // Split operation is not needed.
     return {from};
   }
-  // TODO: context map
   // Split op name.
   ostringstream oss;
   oss << "__" << name << "_split_" << dim;
@@ -1136,6 +1141,7 @@ vector<NodeEntry> GraphPartitioner::SplitEntry(
   node->attrs.name = oss.str();
   node->attrs.dict["num_args"] = std::to_string(num_args);
   node->attrs.dict["dim"] = std::to_string(dim);
+  AssignDevice(node, device_group_id);
   FinalizeNodeCreation(node);
   // Create output entries.
   vector<NodeEntry> ret;
@@ -1150,7 +1156,8 @@ vector<NodeEntry> GraphPartitioner::SplitEntry(
 NodeEntry GraphPartitioner::ConcatEntry(
     const vector<NodeEntry>& from,
     const TShape& ret_shape,
-    const string& name, size_t dim) {
+    const string& name, size_t dim,
+    size_t device_group_id) {
   CHECK(!from.empty());
   CHECK_LT(dim, ret_shape.ndim());
   if (from.size() == 1) {
@@ -1169,6 +1176,7 @@ NodeEntry GraphPartitioner::ConcatEntry(
   node->attrs.name = oss.str();
   node->attrs.dict["num_args"] = std::to_string(from.size());
   node->attrs.dict["dim"] = std::to_string(dim);
+  AssignDevice(node, device_group_id);
   FinalizeNodeCreation(node);
   // Create output entries.
   NodeEntry to{node, 0, 0};
@@ -1188,8 +1196,12 @@ void GraphPartitioner::AllReduceBlocks(
   TShape split_shape = shape;
   split_shape[0] /= outputs.size();
   for (size_t i = 0; i < inputs.size(); ++i) {
-    splitted[i] = SplitEntry(inputs[i]->entry, split_shape,
-                             "red", outputs.size(), 0);
+    splitted[i] = SplitEntry(inputs[i]->entry,
+                             split_shape,
+                             "red",
+                             outputs.size(),
+                             0 /*split dim */,
+                             inputs[i]->device_group_id /*device id*/);
   }
   // Allreduce.
   vector<NodeEntry> reduced(outputs.size());
@@ -1203,6 +1215,7 @@ void GraphPartitioner::AllReduceBlocks(
     sum_node->attrs.op = sum_op;
     sum_node->attrs.name = "__allreduce";
     sum_node->attrs.dict["num_args"] = std::to_string(inputs.size());
+    AssignDevice(sum_node, outputs[i]->device_group_id);
     FinalizeNodeCreation(sum_node);
     // Output entry and shape.
     reduced[i] = NodeEntry{sum_node, 0, 0};
@@ -1210,7 +1223,11 @@ void GraphPartitioner::AllReduceBlocks(
   }
   // Concat.
   for (size_t i = 0; i < outputs.size(); ++i) {
-    outputs[i]->entry = ConcatEntry(reduced, shape, "red", 0);
+    outputs[i]->entry = ConcatEntry(reduced,
+                                    shape,
+                                    "red",
+                                    0 /*concat dim*/,
+                                    outputs[i]->device_group_id /*device id*/);
   }
 }
 
@@ -1286,8 +1303,10 @@ void GraphPartitioner::ConvertGrid(const Grid& from, Grid* to) {
                const vector<Block*>& to, const TShape& to_shape) {
             // Split function here.
             const vector<NodeEntry>& splitted =
-              SplitEntry(from.entry, to_shape, "convert", to.size(), i);
+              SplitEntry(from.entry, to_shape, "convert",
+                         to.size(), i, from.device_group_id);
             for (uint32_t idx = 0; idx < to.size(); ++idx) {
+              CHECK_EQ(from.device_group_id, to[idx]->device_group_id);
               to[idx]->entry = splitted[idx];
             }
           });
@@ -1313,9 +1332,10 @@ void GraphPartitioner::ConvertGrid(const Grid& from, Grid* to) {
             // Concat function.
             vector<NodeEntry> ent;
             for (auto blk : from) {
+              CHECK_EQ(blk->device_group_id, to->device_group_id);
               ent.push_back(blk->entry);
             }
-            to->entry = ConcatEntry(ent, to_shape, "convert", i);
+            to->entry = ConcatEntry(ent, to_shape, "convert", i, to->device_group_id);
           });
     }
   }
@@ -1371,20 +1391,28 @@ Graph GraphPartitioner::Run() {
     //LOG(INFO) << "Split node#" << nodeid << ": " << node->attrs.name;
     if (node->is_variable()) {
       // Variable node does not have input/output grid because it is always
-      // aligned. A series of special split operations will be inserted after
-      // each variable node to dispatch blocks to different devices.
+      // aligned.
       const uint32_t out_ent_id = graph.entry_id(nodeid, 0);
+      // TODO(minjie): Currently we use a control dependency to a series of zero operators
+      // here to simulate the computation while ignore the copy time from CPU to each card.
+      NodePtr node_copy = Node::Create();
+      node_copy->attrs = node->attrs;
+      FinalizeNodeCreation(node_copy);
+      node_output_shapes_[node_copy.get()].push_back(shapes[out_ent_id]);
       // Create splitted nodes.
       // TODO: version ?
-      // TODO: context map
       for (size_t i = 0; i < entry_grids[out_ent_id].TotalNumBlocks(); ++i) {
-        NodePtr varnode = Node::Create();
-        varnode->attrs = node->attrs;
-        varnode->attrs.name = node->attrs.name + "_" + std::to_string(i);
-        FinalizeNodeCreation(varnode);
+        NodePtr zeronode = Node::Create();
+        zeronode->attrs.op = nullptr;
+        zeronode->attrs.name = node->attrs.name + "_" + std::to_string(i);
+        // TODO(minjie): how to set variable node's parsed attribute?
+        // Control dependency.
+        zeronode->control_deps.push_back(node_copy);
+        AssignDevice(zeronode, entry_grids[out_ent_id].BlockAt(i).device_group_id);
+        FinalizeNodeCreation(zeronode);
         // Output entry and shape.
-        entry_grids[out_ent_id].BlockAt(i).entry = {varnode, 0, 0};
-        node_output_shapes_[varnode.get()].push_back(entry_grids[out_ent_id].block_shape());
+        entry_grids[out_ent_id].BlockAt(i).entry = {zeronode, 0, 0};
+        node_output_shapes_[zeronode.get()].push_back(entry_grids[out_ent_id].block_shape());
       }
       continue;
     }
@@ -1436,6 +1464,7 @@ Graph GraphPartitioner::Run() {
       NodePtr n = Node::Create();
       n->attrs = attrs[i];
       n->attrs.name = node->attrs.name + "_" + std::to_string(i);
+      AssignDevice(n, i);
       FinalizeNodeCreation(n);
       splitted_nodes[nodeid].push_back(n);
       // Output shapes.
@@ -1483,10 +1512,20 @@ Graph GraphPartitioner::Run() {
   // Final graph.
   Graph ret;
   for (const NodeEntry& out_ent : src_graph_->outputs) {
+    // TODO(minjie): For output entries, we adopt similar idea of input ones.
+    // Currently we use control dependency to simulate the computation while
+    // saving the copy from multiple gpus to cpu.
     const uint32_t entid = graph.entry_id(out_ent);
+    NodePtr out_node_copy = Node::Create();
+    out_node_copy->attrs.op = nullptr;
+    out_node_copy->attrs.name = out_ent.node->attrs.name;
+    FinalizeNodeCreation(out_node_copy);
+    node_output_shapes_[out_node_copy.get()].push_back(shapes[entid]);
     for (size_t i = 0; i < entry_grids[entid].TotalNumBlocks(); ++i) {
-      ret.outputs.push_back(std::move(entry_grids[entid].BlockAt(i).entry));
+      // Add control dependencies.
+      out_node_copy->control_deps.push_back(entry_grids[entid].BlockAt(i).entry.node);
     }
+    ret.outputs.push_back(NodeEntry{out_node_copy, 0, 0});
   }
   const IndexedGraph& retgraph = ret.indexed_graph();
   LOG(INFO) << "Original Graph: #Nodes=" << graph.num_nodes()
@@ -1505,14 +1544,25 @@ Graph GraphPartitioner::Run() {
       new_shapes[entid] = std::move(node_output_shapes_[node][idx]);
     }
   }
-
-  for (uint32_t entid = 0; entid < retgraph.num_node_entries(); ++entid) {
+  /*for (uint32_t entid = 0; entid < retgraph.num_node_entries(); ++entid) {
     LOG(INFO) << "Entry #" << entid << ": " << new_shapes[entid];
-  }
+  }*/
 
+  // DType information.
+  // TODO: currently make all dtype to be float32.
+  DTypeVector new_dtypes(retgraph.num_node_entries(), 0);
+
+  // Device information.
   DFSVisit(ret.outputs, [&](const NodePtr& node) {
-    LOG(INFO) << node->attrs.name;
+    if (node->attrs.dict.count("ctx_group") != 0) {
+      LOG(INFO) << node->attrs.name << " on device: " << node->attrs.dict.at("ctx_group");
+    } else {
+      LOG(INFO) << node->attrs.name << " on device: unknown";
+    }
   });
+
+  ret.attrs["shape"] = std::make_shared<any>(std::move(new_shapes));
+  ret.attrs["dtype"] = std::make_shared<any>(std::move(new_dtypes));
 
   //return ret;
   return *src_graph_;

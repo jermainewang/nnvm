@@ -353,11 +353,13 @@ class GraphPartitioner {
 
  private:
   std::vector<NodeEntry> SplitEntry(const NodeEntry& from, const TShape& ret_shape,
-                                    const std::string& name, size_t num_args, size_t dim);
+                                    const std::string& name, size_t num_args, size_t dim,
+                                    size_t device_group_id);
 
   NodeEntry ConcatEntry(const std::vector<NodeEntry>& from,
                         const TShape& ret_shape,
-                        const std::string& name, size_t dim);
+                        const std::string& name, size_t dim,
+                        size_t device_group_id);
 
   void AllReduceBlocks(const std::vector<const Block*>& inputs,
                        const std::vector<Block*>& outputs,
