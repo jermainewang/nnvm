@@ -42,6 +42,7 @@ Graph PlaceDevice(Graph src) {
       // If the node has group name in the attribute, then place this node
       // on the device associated with that group.
       const std::string& device_group = it->second;
+      std::cout << "Node #" << nid << " of group: " << device_group << std::endl;
       auto dit = device_assign_map.find(device_group);
       CHECK_NE(dit, device_assign_map.end())
           << "The device assignment not found for group " << device_group;
@@ -202,6 +203,7 @@ Graph PlaceDevice(Graph src) {
     }
     new_device_vec[nid] = new_device_map.at(source);
   }
+  ret.attrs = src.attrs;
   ret.attrs["device"] = std::make_shared<any>(std::move(new_device_vec));
   return ret;
 }

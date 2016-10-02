@@ -83,9 +83,9 @@ Graph PartitionPass(Graph src) {
 
   // Graph partitioner.
   GraphPartitioner pttn(algo, &src);
-  pttn.Run();
 
-  return src;
+  //return src;
+  return pttn.Run();
 }
 
 NNVM_REGISTER_PASS(PartitionPass)

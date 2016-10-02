@@ -234,7 +234,7 @@ inline void FinalizeNodeCreation(NodePtr node) {
 }
 
 inline void AssignDevice(NodePtr node, size_t device_group_id) {
-  node->attrs.dict["ctx_group"] = "gpu:" + std::to_string(device_group_id);
+  node->attrs.dict["ctx_group"] = "group:" + std::to_string(device_group_id);
 }
 
 }  // namespace
@@ -401,7 +401,7 @@ NeuralLevels::NeuralLevels(Graph* src, const NodeEntryGroups* groups):
   for (uint32_t nodeid = 0; nodeid < graph.num_nodes(); ++nodeid) {
     const string& name = graph[nodeid].source->attrs.name;
     CHECK(name == "" || name[0] == '_' || name.find_first_of('_') == name.find_last_of('_'))
-      << "Unsupported operator name: \"" << name << "\"";
+      << "Unsupported node name: \"" << name << "\"";
     if (name == "" || name == "sum_grad") {
       // TODO(minjie): This is an ugly way to ignore non-symbolic operators.
       // These nodes will be put in a group that contains only themselves.
@@ -1386,35 +1386,32 @@ Graph GraphPartitioner::Run() {
     const vector<Scheme>& schemes = algo_.GetEntrySchemes(entid);
     entry_grids.emplace_back(shape, schemes);
   }
-  for (uint32_t nodeid = 0; nodeid < graph.num_nodes(); ++nodeid) {
-    const Node* node = graph[nodeid].source;
-    //LOG(INFO) << "Split node#" << nodeid << ": " << node->attrs.name;
+  DFSVisit( src_graph_->outputs, [&](const NodePtr& node) {
+    const uint32_t nodeid = graph.node_id(node.get());
+    //LOG(INFO) << "Process node#" << nodeid << ": " << node->attrs.name;
     if (node->is_variable()) {
       // Variable node does not have input/output grid because it is always
       // aligned.
       const uint32_t out_ent_id = graph.entry_id(nodeid, 0);
       // TODO(minjie): Currently we use a control dependency to a series of zero operators
       // here to simulate the computation while ignore the copy time from CPU to each card.
-      NodePtr node_copy = Node::Create();
-      node_copy->attrs = node->attrs;
-      FinalizeNodeCreation(node_copy);
-      node_output_shapes_[node_copy.get()].push_back(shapes[out_ent_id]);
-      // Create splitted nodes.
+      node_output_shapes_[node.get()].push_back(shapes[out_ent_id]);
       // TODO: version ?
       for (size_t i = 0; i < entry_grids[out_ent_id].TotalNumBlocks(); ++i) {
         NodePtr zeronode = Node::Create();
-        zeronode->attrs.op = nullptr;
+        // TODO(minjie): should be zero node.
+        zeronode->attrs.op = Op::Get("_NoGradient");
         zeronode->attrs.name = node->attrs.name + "_" + std::to_string(i);
         // TODO(minjie): how to set variable node's parsed attribute?
         // Control dependency.
-        zeronode->control_deps.push_back(node_copy);
+        zeronode->control_deps.push_back(node);
         AssignDevice(zeronode, entry_grids[out_ent_id].BlockAt(i).device_group_id);
         FinalizeNodeCreation(zeronode);
         // Output entry and shape.
         entry_grids[out_ent_id].BlockAt(i).entry = {zeronode, 0, 0};
         node_output_shapes_[zeronode.get()].push_back(entry_grids[out_ent_id].block_shape());
       }
-      continue;
+      return;
     }
     const vector<SchemeRequest>& allreqs = algo_.GetSchemeRequests(nodeid);
     const vector<size_t>& chosen = algo_.GetChosenSchemeRequests(nodeid);
@@ -1472,10 +1469,10 @@ Graph GraphPartitioner::Run() {
         node_output_shapes_[n.get()].push_back(op_output_grids[nodeid][outidx].block_shape());
       }
     }
-  }
+  });
     
   DFSVisit(src_graph_->outputs, [&](const NodePtr& node) {
-    LOG(INFO) << "Processing Node: " << node->attrs.name;
+    //LOG(INFO) << "Processing Node: " << node->attrs.name;
     const uint32_t nodeid = graph.node_id(node.get());
     if (node->is_variable()) {
       // For variable node. Nothing should be done.
@@ -1487,7 +1484,7 @@ Graph GraphPartitioner::Run() {
       const uint32_t in_ent_id = graph.entry_id(node->inputs[i]);
       const Grid& ingrid = entry_grids[in_ent_id];
       Grid& aligned = op_input_grids[nodeid][i];
-      LOG(INFO) << "\tConvert input #" << i;
+      //LOG(INFO) << "\tConvert input #" << i;
       ConvertGrid(ingrid, &aligned);
       aligned_ingrid[i] = &aligned;
     }
@@ -1499,12 +1496,12 @@ Graph GraphPartitioner::Run() {
       aligned_outgrid[i] = &op_output_grids[nodeid][i];
     }
 
-    LOG(INFO) << "\tPerform op";
+    //LOG(INFO) << "\tPerform op";
     PerformOp(aligned_ingrid, aligned_outgrid, splitted_nodes[nodeid]);
 
     // Convert output grids.
     for (size_t i = 0; i < node->num_outputs(); ++i) {
-      LOG(INFO) << "\tConvert output #" << i;
+      //LOG(INFO) << "\tConvert output #" << i;
       ConvertGrid(*aligned_outgrid[i], outgrid[i]);
     }
   });
@@ -1517,7 +1514,8 @@ Graph GraphPartitioner::Run() {
     // saving the copy from multiple gpus to cpu.
     const uint32_t entid = graph.entry_id(out_ent);
     NodePtr out_node_copy = Node::Create();
-    out_node_copy->attrs.op = nullptr;
+    // TODO(minjie): should be zero node.
+    out_node_copy->attrs.op = Op::Get("_NoGradient");
     out_node_copy->attrs.name = out_ent.node->attrs.name;
     FinalizeNodeCreation(out_node_copy);
     node_output_shapes_[out_node_copy.get()].push_back(shapes[entid]);
@@ -1564,8 +1562,7 @@ Graph GraphPartitioner::Run() {
   ret.attrs["shape"] = std::make_shared<any>(std::move(new_shapes));
   ret.attrs["dtype"] = std::make_shared<any>(std::move(new_dtypes));
 
-  //return ret;
-  return *src_graph_;
+  return ret;
 }
 
 }  // namespace pass
