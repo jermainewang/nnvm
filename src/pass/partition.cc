@@ -1563,6 +1563,17 @@ Graph GraphPartitioner::Run() {
   ret.attrs["shape"] = std::make_shared<any>(std::move(new_shapes));
   ret.attrs["dtype"] = std::make_shared<any>(std::move(new_dtypes));
 
+  /*cout << "digraph {" << endl;
+  const auto& retidx = ret.indexed_graph();
+  for (uint32_t nid = 0; nid < retidx.num_nodes(); ++nid) {
+    const auto& n = retidx[nid];
+    for (const auto& in : n.inputs) {
+      cout << "\tn" << in.node_id << "_" << retidx[in.node_id].source->attrs.name
+           << " -> n" << nid << "_" << n.source->attrs.name << endl;
+    }
+  }
+  cout << "}" << endl;*/
+
   return ret;
 }
 

@@ -29,14 +29,14 @@ Graph InferAttr(Graph &&ret,
   static auto& backward_map =
       Op::GetAttr<FBackwardOutToInIndex>("FBackwardOutToInIndex");
   // reshape shape vector
-  AttrVector rshape(idx.num_node_entries(), default_val);
+  AttrVector inferred(idx.num_node_entries(), default_val);
 
   if (ret.attrs.count(input_name) != 0) {
     const AttrVector& shape_args = ret.GetAttr<AttrVector>(input_name);
     CHECK_LE(shape_args.size(), idx.input_nodes().size())
         << "More provided shapes than number of arguments.";
     for (size_t i = 0; i < shape_args.size(); ++i) {
-      rshape[idx.entry_id(idx.input_nodes()[i], 0)] = shape_args[i];
+      inferred[idx.entry_id(idx.input_nodes()[i], 0)] = shape_args[i];
     }
     // erase the provided arguments
     ret.attrs.erase(input_name);
@@ -61,35 +61,38 @@ Graph InferAttr(Graph &&ret,
       CHECK(inode.source->op() == nullptr);
       CHECK_EQ(num_outputs, 1);
       const uint32_t out_ent_id = idx.entry_id(nid, 0);
-      if (shape_attr_key.length() != 0 && fis_none(rshape[out_ent_id])) {
+      if (shape_attr_key.length() != 0 && fis_none(inferred[out_ent_id])) {
         auto it = inode.source->attrs.dict.find(shape_attr_key);
         if (it != inode.source->attrs.dict.end()) {
           istringstream is(it->second);
-          CHECK(is >> rshape[out_ent_id]) << "Invalid attribute";
+          CHECK(is >> inferred[out_ent_id]) << "Invalid attribute";
         }
       }
     } else if (finfer_shape.count(inode.source->op())) {
       // Forward operator inference.
       ishape.resize(num_inputs, default_val);
       for (uint32_t i = 0; i < ishape.size(); ++i) {
-        ishape[i] = rshape[idx.entry_id(inode.inputs[i])];
+        ishape[i] = inferred[idx.entry_id(inode.inputs[i])];
       }
       oshape.resize(num_outputs, default_val);
       for (uint32_t i = 0; i < oshape.size(); ++i) {
-        oshape[i] = rshape[idx.entry_id(nid, i)];
+        oshape[i] = inferred[idx.entry_id(nid, i)];
       }
       // Call inference function of the operator.
       bool forward_known = finfer_shape[inode.source->op()](
           inode.source->attrs, &ishape, &oshape);
-      num_unknown += !forward_known;
+      if (!forward_known) {
+        ++num_unknown;
+      }
       // Save to the result map.
       for (uint32_t i = 0; i < num_inputs; ++i) {
-        rshape[idx.entry_id(inode.inputs[i])] = ishape[i];
+        inferred[idx.entry_id(inode.inputs[i])] = ishape[i];
       }
       for (uint32_t i = 0; i < num_outputs; ++i) {
-        rshape[idx.entry_id(nid, i)] = oshape[i];
+        inferred[idx.entry_id(nid, i)] = oshape[i];
       }
-    } else if (backward_map.count(inode.source->op())) {
+    }
+    /*else if (backward_map.count(inode.source->op())) {
       // Backward operator inference.
       CHECK_GE(inode.control_deps.size(), 1)
           << "BackwardOp need to have control_deps to its forward op";
@@ -104,14 +107,14 @@ Graph InferAttr(Graph &&ret,
         CHECK_LT(out_map[i], fnode.inputs.size());
         const uint32_t fwd_in_ent_id = idx.entry_id(fnode.inputs[out_map[i]]);
         const uint32_t bwd_out_ent_id = idx.entry_id(nid, i);
-        rshape[bwd_out_ent_id] = rshape[fwd_in_ent_id];
-        if (fis_none(rshape[bwd_out_ent_id])) {
+        inferred[bwd_out_ent_id] = inferred[fwd_in_ent_id];
+        if (fis_none(inferred[bwd_out_ent_id])) {
           // Still unknown due to the forward shape is also unknown.
           known = false;
         }
       }
       num_unknown += !known;
-    }
+    }*/
   }
   // Inference & check shapes using gradient entry mapping if available.
   if (ret.attrs.count("forward2backward") != 0) {
@@ -120,19 +123,19 @@ Graph InferAttr(Graph &&ret,
     for (const auto& fwd2bwd : forward2backward) {
       const uint32_t fwd_ent_id = fwd2bwd.first;
       const uint32_t bwd_ent_id = fwd2bwd.second;
-      if (fis_none(rshape[bwd_ent_id])) {
-        rshape[bwd_ent_id] = rshape[fwd_ent_id];
+      if (fis_none(inferred[bwd_ent_id])) {
+        inferred[bwd_ent_id] = inferred[fwd_ent_id];
       } else {
-        CHECK_EQ(rshape[bwd_ent_id], rshape[fwd_ent_id])
-          << rshape[bwd_ent_id] << " v.s. " << rshape[fwd_ent_id]
-          << " Backward entry (#" << bwd_ent_id << ") shape should equal to "
-          << "its corresponding forward (#" << fwd_ent_id << ") entry shape.";
+        CHECK_EQ(inferred[bwd_ent_id], inferred[fwd_ent_id])
+          << inferred[bwd_ent_id] << " v.s. " << inferred[fwd_ent_id]
+          << " Backward entry (#" << bwd_ent_id << ") should have the same infer value"
+          << " with its corresponding forward (#" << fwd_ent_id << ") entry.";
       }
     }
   }
   // set the shapes
-  ret.attrs[attr_name] = std::make_shared<any>(std::move(rshape));
-  // number of nodes who knows the shape.
+  ret.attrs[attr_name] = std::make_shared<any>(std::move(inferred));
+  // Number of entries that could not be inferred from this pass.
   ret.attrs[unknown_name] = std::make_shared<any>(num_unknown);
   return ret;
 }
