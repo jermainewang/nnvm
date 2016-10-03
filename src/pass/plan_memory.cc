@@ -153,6 +153,8 @@ Graph PlanMemory(Graph ret) {
   std::vector<int> storage_inplace_index(idx.num_node_entries(), -1);
   const ShapeVector& shape_vec = ret.GetAttr<ShapeVector>("shape");
   const DTypeVector& dtype_vec = ret.GetAttr<DTypeVector>("dtype");
+  CHECK_EQ(shape_vec.size(), idx.num_node_entries());
+  CHECK_EQ(dtype_vec.size(), idx.num_node_entries());
   const DeviceVector* device_vec = nullptr;
   static auto& finplace_option = Op::GetAttr<FInplaceOption>("FInplaceOption");
 
@@ -188,14 +190,14 @@ Graph PlanMemory(Graph ret) {
     const int dev_id = (device_vec != nullptr) ? device_vec->at(nid) : 0;
     // allocate output
     for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
-      uint32_t eid = idx.entry_id(nid, index);
+      const uint32_t eid = idx.entry_id(nid, index);
       if (storage[eid] == GraphAllocator::kBadStorageID) {
         storage[eid] = allocator.Request(dev_id, dtype_vec[eid], shape_vec[eid], nid);
       }
     }
     // then free inputs
     for (const auto& e : inode.inputs) {
-      uint32_t eid = idx.entry_id(e);
+      const uint32_t eid = idx.entry_id(e);
       // temp_ref_count == 0 means it is taken by inplace op
       if (ref_count[eid] == 0) continue;
       // if we decrease it to zero, means we are ready to relase
@@ -207,7 +209,7 @@ Graph PlanMemory(Graph ret) {
     // check if there are outputs that can be freeded immediately
     // these output are not referenced by any operator.
     for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
-      uint32_t eid = idx.entry_id(nid, index);
+      const uint32_t eid = idx.entry_id(nid, index);
       if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
         allocator.Release(storage[eid], nid);
         // use -2 to indicate that the node was never touched.

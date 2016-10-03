@@ -203,7 +203,6 @@ Graph PlaceDevice(Graph src) {
     }
     new_device_vec[nid] = new_device_map.at(source);
   }
-  ret.attrs = src.attrs;
   ret.attrs["device"] = std::make_shared<any>(std::move(new_device_vec));
   return ret;
 }

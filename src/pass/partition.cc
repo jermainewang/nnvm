@@ -1369,6 +1369,7 @@ Graph GraphPartitioner::Run() {
   
   const IndexedGraph& graph = src_graph_->indexed_graph();
   const ShapeVector& shapes = src_graph_->GetAttr<ShapeVector>("shape");
+  CHECK_EQ(shapes.size(), graph.num_node_entries());
   // Partitioned grid of each entry in the original graph.
   vector<Grid> entry_grids;
   entry_grids.reserve(graph.num_node_entries());

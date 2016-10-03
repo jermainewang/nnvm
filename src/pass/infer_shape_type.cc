@@ -7,20 +7,22 @@
 #include <nnvm/op_attr_types.h>
 #include <nnvm/graph_attr_types.h>
 
+using namespace std;
+
 namespace nnvm {
 namespace pass {
 namespace {
 
-template<typename AttrType, typename IsNone>
+template<typename AttrType, typename FIsNone>
 Graph InferAttr(Graph &&ret,
                 const AttrType default_val,
-                const char* infer_name,
-                const char* input_name,
-                const char* attr_key_name,
-                const char* attr_name,
-                const char* unknown_name,
-                IsNone fis_none) {
-  using AttrVector = std::vector<AttrType>;
+                const string& infer_name,
+                const string& input_name,
+                const string& attr_key_name,
+                const string& attr_name,
+                const string& unknown_name,
+                FIsNone fis_none) {
+  using AttrVector = vector<AttrType>;
   const IndexedGraph& idx = ret.indexed_graph();
   static auto& finfer_shape =
       Op::GetAttr<FInferNodeEntryAttr<AttrType>>(infer_name);
@@ -39,15 +41,15 @@ Graph InferAttr(Graph &&ret,
     // erase the provided arguments
     ret.attrs.erase(input_name);
   }
-  std::string shape_attr_key;
+  string shape_attr_key;
   if (ret.attrs.count(attr_key_name) != 0) {
-    shape_attr_key = ret.GetAttr<std::string>(attr_key_name);
+    shape_attr_key = ret.GetAttr<string>(attr_key_name);
     // erase the provided arguments
     ret.attrs.erase(attr_key_name);
   }
 
   // Temp space for shape inference.
-  std::vector<AttrType> ishape, oshape;
+  vector<AttrType> ishape, oshape;
   // number of completed nodes
   size_t num_unknown = 0;
   for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
@@ -62,7 +64,7 @@ Graph InferAttr(Graph &&ret,
       if (shape_attr_key.length() != 0 && fis_none(rshape[out_ent_id])) {
         auto it = inode.source->attrs.dict.find(shape_attr_key);
         if (it != inode.source->attrs.dict.end()) {
-          std::istringstream is(it->second);
+          istringstream is(it->second);
           CHECK(is >> rshape[out_ent_id]) << "Invalid attribute";
         }
       }
@@ -95,7 +97,7 @@ Graph InferAttr(Graph &&ret,
       const IndexedGraph::Node& fnode = idx[fnode_id];
       // Inference the outputs of backward operator (equal to the inputs
       // of its corresponding forward operator).
-      const std::vector<uint32_t>& out_map =
+      const vector<uint32_t>& out_map =
           backward_map[inode.source->op()](inode.source->attrs);
       bool known = true;
       for (size_t i = 0; i < out_map.size(); ++i) {
@@ -113,8 +115,8 @@ Graph InferAttr(Graph &&ret,
   }
   // Inference & check shapes using gradient entry mapping if available.
   if (ret.attrs.count("forward2backward") != 0) {
-    const std::unordered_map<uint32_t, uint32_t>& forward2backward
-      = ret.GetAttr<std::unordered_map<uint32_t, uint32_t>>("forward2backward");
+    const unordered_map<uint32_t, uint32_t>& forward2backward
+      = ret.GetAttr<unordered_map<uint32_t, uint32_t>>("forward2backward");
     for (const auto& fwd2bwd : forward2backward) {
       const uint32_t fwd_ent_id = fwd2bwd.first;
       const uint32_t bwd_ent_id = fwd2bwd.second;
