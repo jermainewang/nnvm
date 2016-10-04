@@ -43,7 +43,7 @@ struct Scheme {
   }
 };
 
-using FPartition = std::function<std::vector<NodeAttrs>(
+using FPartition = std::function<NodeAttrs(
     const NodeAttrs& attrs, size_t num_partitions)>;
 
 struct SchemeRequest {

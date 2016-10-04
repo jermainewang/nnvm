@@ -28,6 +28,18 @@ void PrintPassVisitor(const NodePtr& n) {
   }
 }
 
+int GetNumCuts(int num_devices) {
+  CHECK_GT(num_devices, 1) << "Must have more than two devices.";
+  int num_cut = 0;
+  while(num_devices > 1) {
+    CHECK_EQ(num_devices % 2, 0)
+      << "Currently only support number of devices equal to 2^x";
+    num_devices /= 2;
+    ++num_cut;
+  }
+  return num_cut;
+}
+
 }  // namespace
 
 // Pass function that simply print the names of all operators in the graph.
@@ -48,8 +60,13 @@ Graph PartitionPass(Graph src) {
     << "Gradient entry mapping information is required.";
   CHECK_NE(src.attrs.count("backward2forward"), 0) 
     << "Gradient entry mapping information is required.";
+  CHECK_NE(src.attrs.count("num_devices"), 0)
+    << "Require number of devices for partitioning";
   const unordered_map<uint32_t, uint32_t>& backward2forward =
     src.GetAttr<unordered_map<uint32_t, uint32_t>>("backward2forward");
+  const int num_devices = src.GetAttr<int>("num_devices");
+  const int num_cuts = GetNumCuts(num_devices);
+  LOG(INFO) << "Number of cuts: " << num_cuts;
 
   const IndexedGraph& graph = src.indexed_graph();
   const uint32_t start_node_id = graph.node_id(src.outputs[0].node.get());
@@ -77,7 +94,7 @@ Graph PartitionPass(Graph src) {
 
   // Cut algorithm.
   CutAlgorithm algo(&src, nnlvls, groups);
-  cost_t total_cost = algo.KCuts(1);
+  cost_t total_cost = algo.KCuts(num_cuts);
   algo.Print();
   LOG(INFO) << "Total K-cuts cost: " << total_cost;
 
@@ -94,6 +111,7 @@ NNVM_REGISTER_PASS(PartitionPass)
 .depend_graph_attr("shape")  // Shape information from InferShapePass.
 .depend_graph_attr("forward2backward")  // Gradient information from GradientPass.
 .depend_graph_attr("backward2forward")  // Gradient information from GradientPass.
+.depend_graph_attr("num_devices")  // Number of devices
 .depend_op_attr("FAlignedSchemes")  // Require op to provide aligned schemes.
 .set_change_graph(true);
 

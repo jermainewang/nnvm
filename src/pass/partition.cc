@@ -912,8 +912,15 @@ void CutAlgorithm::Print() const {
     for (const auto& dp_op : dp_operators_[i]) {
       const uint32_t nodeid = dp_op.node_id;
       const Node* node = graph[nodeid].source;
+      ostringstream oss;
+      oss << " [";
+      for (size_t choseid : dp_op.chosen_aligned_requests) {
+        oss << choseid << " ";
+      }
+      oss << "]";
       LOG(INFO) << "\t#" << nodeid << ": \"" << node->attrs.name << "\""
-                << (node->is_variable()? "(variable)" : "");
+                << (node->is_variable()? "(variable)" : "")
+                << oss.str();
     }
     LOG(INFO) << "]";
     if (i < dp_entries_.size()) {
@@ -1389,7 +1396,7 @@ Graph GraphPartitioner::Run() {
   }
   DFSVisit( src_graph_->outputs, [&](const NodePtr& node) {
     const uint32_t nodeid = graph.node_id(node.get());
-    //LOG(INFO) << "Process node#" << nodeid << ": " << node->attrs.name;
+    LOG(INFO) << "Process node#" << nodeid << ": " << node->attrs.name;
     if (node->is_variable()) {
       // Variable node does not have input/output grid because it is always
       // aligned.
@@ -1444,24 +1451,24 @@ Graph GraphPartitioner::Run() {
     op_output_grids[nodeid].swap(output_grids);
 
     // Split attributes.
-    vector<NodeAttrs> attrs = {node->attrs};
+    NodeAttrs attrs = node->attrs;
+    attrs.parsed.clear();  // Require attributes to be re-parsed.
     for (size_t choseid : chosen) {
       const SchemeRequest& req = allreqs[choseid];
       CHECK(req.partitioner);
-      vector<NodeAttrs> tmp;
-      for (const NodeAttrs& parent : attrs) {
-        const vector<NodeAttrs>& child = req.partitioner(parent, 2);
-        for (const auto& attr : child) {
-          tmp.push_back(attr);
-        }
-      }
-      attrs.swap(tmp);
+      attrs = req.partitioner(attrs, 2);
     }
     // Create splitted nodes.
-    for (size_t i = 0; i < attrs.size(); ++i) {
+    for (size_t i = 0; i < op_output_grids[nodeid][0].TotalNumBlocks(); ++i) {
       NodePtr n = Node::Create();
-      n->attrs = attrs[i];
+      n->attrs = attrs;
       n->attrs.name = node->attrs.name + "_" + std::to_string(i);
+      // Control dependencies.
+      for (NodePtr depend_node : node->control_deps) {
+        const uint32_t depend_nid = graph.node_id(depend_node.get());
+        CHECK_LT(depend_nid, nodeid);
+        n->control_deps.push_back(splitted_nodes[depend_nid][i]);
+      }
       AssignDevice(n, i);
       FinalizeNodeCreation(n);
       splitted_nodes[nodeid].push_back(n);
