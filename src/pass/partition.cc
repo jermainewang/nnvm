@@ -1152,10 +1152,11 @@ vector<NodeEntry> GraphPartitioner::SplitEntry(
   FinalizeNodeCreation(node);
   // Create output entries.
   vector<NodeEntry> ret;
+  CHECK(node_output_shapes_[node].empty());
   for (uint32_t i = 0; i < num_args; ++i) {
     ret.push_back(NodeEntry{node, i, 0});
     // Output shape.
-    node_output_shapes_[node.get()].push_back(ret_shape);
+    node_output_shapes_[node].push_back(ret_shape);
   }
   return ret;
 }
@@ -1187,7 +1188,8 @@ NodeEntry GraphPartitioner::ConcatEntry(
   FinalizeNodeCreation(node);
   // Create output entries.
   NodeEntry to{node, 0, 0};
-  node_output_shapes_[node.get()].push_back(ret_shape);
+  CHECK(node_output_shapes_[node].empty());
+  node_output_shapes_[node].push_back(ret_shape);
   return to;
 }
 
@@ -1226,7 +1228,8 @@ void GraphPartitioner::AllReduceBlocks(
     FinalizeNodeCreation(sum_node);
     // Output entry and shape.
     reduced[i] = NodeEntry{sum_node, 0, 0};
-    node_output_shapes_[sum_node.get()].push_back(split_shape);
+    CHECK(node_output_shapes_[sum_node].empty());
+    node_output_shapes_[sum_node].push_back(split_shape);
   }
   // Concat.
   for (size_t i = 0; i < outputs.size(); ++i) {
@@ -1403,7 +1406,8 @@ Graph GraphPartitioner::Run() {
       const uint32_t out_ent_id = graph.entry_id(nodeid, 0);
       // TODO(minjie): Currently we use a control dependency to a series of zero operators
       // here to simulate the computation while ignore the copy time from CPU to each card.
-      node_output_shapes_[node.get()].push_back(shapes[out_ent_id]);
+      CHECK(node_output_shapes_[node].empty());
+      node_output_shapes_[node].push_back(shapes[out_ent_id]);
       // TODO: version ?
       for (size_t i = 0; i < entry_grids[out_ent_id].TotalNumBlocks(); ++i) {
         NodePtr zeronode = Node::Create();
@@ -1417,7 +1421,8 @@ Graph GraphPartitioner::Run() {
         FinalizeNodeCreation(zeronode);
         // Output entry and shape.
         entry_grids[out_ent_id].BlockAt(i).entry = {zeronode, 0, 0};
-        node_output_shapes_[zeronode.get()].push_back(entry_grids[out_ent_id].block_shape());
+        CHECK(node_output_shapes_[zeronode].empty());
+        node_output_shapes_[zeronode].push_back(entry_grids[out_ent_id].block_shape());
       }
       return;
     }
@@ -1473,8 +1478,9 @@ Graph GraphPartitioner::Run() {
       FinalizeNodeCreation(n);
       splitted_nodes[nodeid].push_back(n);
       // Output shapes.
+      CHECK(node_output_shapes_[n].empty());
       for (size_t outidx = 0; outidx < op_output_grids[nodeid].size(); ++outidx) {
-        node_output_shapes_[n.get()].push_back(op_output_grids[nodeid][outidx].block_shape());
+        node_output_shapes_[n].push_back(op_output_grids[nodeid][outidx].block_shape());
       }
     }
   });
@@ -1526,7 +1532,8 @@ Graph GraphPartitioner::Run() {
     out_node_copy->attrs.op = Op::Get("_NoGradient");
     out_node_copy->attrs.name = out_ent.node->attrs.name;
     FinalizeNodeCreation(out_node_copy);
-    node_output_shapes_[out_node_copy.get()].push_back(shapes[entid]);
+    CHECK(node_output_shapes_[out_node_copy].empty());
+    node_output_shapes_[out_node_copy].push_back(shapes[entid]);
     for (size_t i = 0; i < entry_grids[entid].TotalNumBlocks(); ++i) {
       // Add control dependencies.
       out_node_copy->control_deps.push_back(entry_grids[entid].BlockAt(i).entry.node);
@@ -1541,15 +1548,17 @@ Graph GraphPartitioner::Run() {
 
   // Shape information.
   ShapeVector new_shapes(retgraph.num_node_entries());
-  for (uint32_t nodeid = 0; nodeid < retgraph.num_nodes(); ++nodeid) {
-    const Node* node = retgraph[nodeid].source;
-    CHECK_EQ(node_output_shapes_.at(node).size(), node->num_outputs());
+  DFSVisit(ret.outputs, [&] (const NodePtr& node) {
+    const uint32_t nodeid = retgraph.node_id(node.get());
+    LOG(INFO) << "Node #" << nodeid << ": " << node->attrs.name;
+    CHECK_EQ(node_output_shapes_.at(node).size(), node->num_outputs())
+      << node_output_shapes_.at(node).size() << " " << node->num_outputs();
     for (size_t idx = 0; idx < node->num_outputs(); ++idx) {
       const uint32_t entid = retgraph.entry_id(nodeid, idx);
       CHECK_LT(entid, retgraph.num_node_entries());
       new_shapes[entid] = std::move(node_output_shapes_[node][idx]);
     }
-  }
+  });
   /*for (uint32_t entid = 0; entid < retgraph.num_node_entries(); ++entid) {
     LOG(INFO) << "Entry #" << entid << ": " << new_shapes[entid];
   }*/

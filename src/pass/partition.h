@@ -385,7 +385,7 @@ class GraphPartitioner {
   const CutAlgorithm& algo_;
   Graph* src_graph_;
 
-  std::unordered_map<const Node*, std::vector<TShape>> node_output_shapes_;
+  std::unordered_map<NodePtr, std::vector<TShape>> node_output_shapes_;
 };
 
 }  // namespace pass

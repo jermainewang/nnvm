@@ -92,7 +92,7 @@ Graph InferAttr(Graph &&ret,
         inferred[idx.entry_id(nid, i)] = oshape[i];
       }
     }
-    /*else if (backward_map.count(inode.source->op())) {
+    else if (backward_map.count(inode.source->op())) {
       // Backward operator inference.
       CHECK_GE(inode.control_deps.size(), 1)
           << "BackwardOp need to have control_deps to its forward op";
@@ -114,7 +114,7 @@ Graph InferAttr(Graph &&ret,
         }
       }
       num_unknown += !known;
-    }*/
+    }
   }
   // Inference & check shapes using gradient entry mapping if available.
   if (ret.attrs.count("forward2backward") != 0) {
