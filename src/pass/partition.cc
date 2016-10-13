@@ -601,7 +601,13 @@ cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
     // Note that if source scheme is reduction, the area of source region and target
     // region may be different.
     if (sch2.type == Scheme::kCut) {
-      cost = r1.Area();
+      if (!r2.CanSplit2(sch2)) {
+        // Cannot split given the scheme. Return a very large cost that is guaranteed to
+        // be worse.
+        cost = 100 * (r1.Area() + r2.Area());
+      } else {
+        cost = r1.Area();
+      }
     } else if (sch2.type == Scheme::kRep) {
       cost = 2 * r1.Area();
     } else {
@@ -1201,6 +1207,8 @@ void GraphPartitioner::AllReduceBlocks(
   const Op* sum_op = Op::Get("ElementWiseSum");
   // Split for balanced allreduce.
   vector<vector<NodeEntry>> splitted(inputs.size());
+  // TODO(minjie): The split here should be a FlattenAndSplit because we
+  // in fact don't care about the shape but only the length of the array.
   CHECK_EQ(shape[0] % outputs.size(), 0);
   TShape split_shape = shape;
   split_shape[0] /= outputs.size();
