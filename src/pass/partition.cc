@@ -163,7 +163,7 @@ class GridIndexMap {
       const Block& blk = grid.BlockAt(i);
       const size_t hash = BlockIndexHash(grid, blk.index, blk.replication_id);
       CHECK(hash < gridindex2block_.size());
-      gridindex2block_[hash] = hash;
+      gridindex2block_[hash] = i;
     }
   }
 
@@ -235,6 +235,19 @@ inline void FinalizeNodeCreation(NodePtr node) {
 
 inline void AssignDevice(NodePtr node, size_t device_group_id) {
   node->attrs.dict["ctx_group"] = "group:" + std::to_string(device_group_id);
+}
+
+#define CHECK_ONDEVICE(ent, dev) \
+  CHECK_EQ((ent).node->attrs.dict["ctx_group"], "group:" + std::to_string((dev))) \
+  << (ent).node->attrs.dict["ctx_group:"] << " v.s. " << (dev)
+
+template<typename T>
+inline vector<int> GetDevId(const vector<T>& inputs) {
+  vector<int> ret(inputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    ret[i] = inputs[i]->device_group_id;
+  }
+  return ret;
 }
 
 }  // namespace
@@ -636,8 +649,10 @@ cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
   return cost;
 }
 
-CutAlgorithm::CutAlgorithm(Graph* src, const Levels& levels, const NodeEntryGroups& groups):
-  src_graph_(src), levels_(levels), entry_groups_(groups) {
+CutAlgorithm::CutAlgorithm(Graph* src, const Levels& levels,
+                           const NodeEntryGroups& groups,
+                           size_t num_devices):
+  src_graph_(src), levels_(levels), entry_groups_(groups), num_devices_(num_devices) {
   const IndexedGraph& idxgraph = src->indexed_graph();
   const OpMap<FAlignedSchemes>& align_map =
     Op::GetAttr<FAlignedSchemes>("FAlignedSchemes");
@@ -1179,7 +1194,6 @@ NodeEntry GraphPartitioner::ConcatEntry(
     return from[0];
   }
   const Op* concat_op = Op::Get("Concat");
-  // TODO: context map
   // Concat op name.
   ostringstream oss;
   oss << "__" << name << "_concat_" << dim;
@@ -1199,11 +1213,54 @@ NodeEntry GraphPartitioner::ConcatEntry(
   return to;
 }
 
+void GraphPartitioner::BroadcastEntries(
+    const vector<int>& src_dev, const vector<int>& tgt_dev,
+    const TShape& shape, vector<NodeEntry>* dev_entries) {
+  CHECK_EQ(dev_entries->size(), num_devices_);
+  const Op* copy_op = Op::Get("_CrossDeviceCopy");
+  vector<bool> visited(num_devices_, false);
+  for (const int src : src_dev) {
+    visited[src] = true;
+  }
+  const auto& stages = comm_planner_->BroadcastPlan(src_dev, tgt_dev);
+  for (size_t stageid = 0; stageid < stages.size(); ++stageid) {
+    for (const CommPlanner::Broadcast& bcast : stages[stageid].broadcasts) {
+      CHECK(visited[bcast.from]);
+      for (const int to : bcast.to) {
+        if (to == bcast.from) {
+          (*dev_entries)[to] = (*dev_entries)[bcast.from];
+        } else {
+          CHECK(!visited[to]);
+          NodePtr copy_node = Node::Create();
+          copy_node->attrs.op = copy_op;
+          copy_node->attrs.name = "__broadcast_stage" + std::to_string(stageid);
+          copy_node->inputs.push_back((*dev_entries)[bcast.from]);
+          AssignDevice(copy_node, to);
+          FinalizeNodeCreation(copy_node);
+          // Shape.
+          CHECK(node_output_shapes_[copy_node].empty());
+          node_output_shapes_[copy_node].push_back(shape);
+          // Update the node entry of the target node.
+          (*dev_entries)[to] = NodeEntry{copy_node, 0, 0};
+          visited[to] = true;
+        }
+      }
+    }
+  }
+  for (const int tgt : tgt_dev) {
+    CHECK(visited[tgt]);
+    // TODO(minjie): cannot use following sanity check since in reduce, if there is only
+    // one in and one output, the entry is directly assigned, leading to entry with different
+    // device. Though this is still good since PlaceDevice pass will fix it. It is still
+    // better to remove that case and put an explicit copy in it.
+    //CHECK_ONDEVICE((*dev_entries)[tgt], tgt);
+  }
+}
+
 void GraphPartitioner::AllReduceBlocks(
     const vector<const Block*>& inputs, const vector<Block*>& outputs,
     const TShape& shape) {
   CHECK_GT(inputs.size(), 1);
-  // TODO: context map
   const Op* sum_op = Op::Get("ElementWiseSum");
   // Split for balanced allreduce.
   vector<vector<NodeEntry>> splitted(inputs.size());
@@ -1220,28 +1277,81 @@ void GraphPartitioner::AllReduceBlocks(
                              0 /*split dim */,
                              inputs[i]->device_group_id /*device id*/);
   }
-  // Allreduce.
-  vector<NodeEntry> reduced(outputs.size());
-  TShape allreduce_shape = shape;
-  allreduce_shape[0] /= outputs.size();
+
+  // Multi-stage Allreduce.
+  //  - Reduce Phase:
+  vector<NodeEntry> final_sum(outputs.size());
+  const vector<int>& src_dev = GetDevId(inputs);
   for (size_t i = 0; i < outputs.size(); ++i) {
-    NodePtr sum_node = Node::Create();
+    vector<NodeEntry> tmp_sum(num_devices_);
+    // Initial reduced entries are from the splitted inputs.
     for (size_t j = 0; j < inputs.size(); ++j) {
-      sum_node->inputs.push_back(splitted[j][i]);
+      tmp_sum[inputs[j]->device_group_id] = splitted[j][i];
     }
-    sum_node->attrs.op = sum_op;
-    sum_node->attrs.name = "__allreduce";
-    sum_node->attrs.dict["num_args"] = std::to_string(inputs.size());
-    AssignDevice(sum_node, outputs[i]->device_group_id);
-    FinalizeNodeCreation(sum_node);
-    // Output entry and shape.
-    reduced[i] = NodeEntry{sum_node, 0, 0};
-    CHECK(node_output_shapes_[sum_node].empty());
-    node_output_shapes_[sum_node].push_back(split_shape);
+    // Get reduce plan.
+    const uint32_t tgt_dev = outputs[i]->device_group_id;
+    const vector<CommPlanner::ReduceStage>& stages = comm_planner_->ReducePlan(
+        src_dev, tgt_dev);
+    // Perform multi-stage reduce.
+    for (size_t stageid = 0; stageid < stages.size(); ++stageid) {
+      if (stageid == stages.size() - 1) {
+        // Final stage must sum to the target device.
+        CHECK(stages[stageid].reduces.size() == 1 &&
+              stages[stageid].reduces[0].to == tgt_dev);
+      }
+      for (const CommPlanner::Reduce& red : stages[stageid].reduces) {
+        if (red.from.size() == 1) {
+          // Only one input, just directly use that entry without summation.
+          tmp_sum[red.to] = tmp_sum[red.from[0]];
+        } else {
+          // Create sum node.
+          NodePtr sum_node = Node::Create();
+          // Create input entries.
+          for (const size_t procid : red.from) {
+            sum_node->inputs.push_back(tmp_sum[procid]);
+          }
+          sum_node->attrs.op = sum_op;
+          sum_node->attrs.name = "__reduce_stage" + std::to_string(stageid);
+          sum_node->attrs.dict["num_args"] = std::to_string(red.from.size());
+          AssignDevice(sum_node, red.to);
+          FinalizeNodeCreation(sum_node);
+          // Shape.
+          CHECK(node_output_shapes_[sum_node].empty());
+          node_output_shapes_[sum_node].push_back(split_shape);
+          // Update the node entry of the target node.
+          tmp_sum[red.to] = NodeEntry{sum_node, 0, 0};
+        }
+      }
+    }
+    // Save the final sum.
+    final_sum[i] = tmp_sum[tgt_dev];
   }
+  // - Broadcast Phase:
+  vector<vector<NodeEntry>> to_concat(outputs.size());
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    to_concat[i].resize(final_sum.size());
+  }
+  const vector<int>& tgt_dev = GetDevId(outputs);
+  for (size_t i = 0; i < final_sum.size(); ++i) {
+    const int src_dev = outputs[i]->device_group_id;
+    vector<NodeEntry> tmp_bcast(num_devices_);
+    tmp_bcast[src_dev] = final_sum[i];
+    BroadcastEntries({src_dev}, tgt_dev, split_shape, &tmp_bcast);
+    // Record the broadcast outputs.
+    for (size_t j = 0; j < outputs.size(); ++j) {
+      to_concat[j][i] = tmp_bcast[tgt_dev[j]];
+    }
+  }
+  
   // Concat.
   for (size_t i = 0; i < outputs.size(); ++i) {
-    outputs[i]->entry = ConcatEntry(reduced,
+    //for (const auto& concat_ent : to_concat[i]) {
+      //CHECK_EQ(concat_ent.node->attrs.dict["ctx_group"],
+               //to_concat[i][0].node->attrs.dict["ctx_group"])
+        //<< concat_ent.node->attrs.dict["ctx_group"]
+        //<< " v.s. " << to_concat[i][0].node->attrs.dict["ctx_group"];
+    //}
+    outputs[i]->entry = ConcatEntry(to_concat[i],
                                     shape,
                                     "red",
                                     0 /*concat dim*/,
@@ -1250,23 +1360,19 @@ void GraphPartitioner::AllReduceBlocks(
 }
 
 void GraphPartitioner::AllShuffleBlocks(
-    const vector<const Block*>& inputs, const vector<Block*>& outputs) {
+    const vector<const Block*>& inputs, const vector<Block*>& outputs,
+    const TShape& shape) {
   CHECK(!inputs.empty() && !outputs.empty());
-  size_t fetch_idx = 0;
+  const vector<int>& src_dev = GetDevId(inputs);
+  const vector<int>& tgt_dev = GetDevId(outputs);
+  vector<NodeEntry> tmp_bcast(num_devices_);
+  for (const Block* inblk : inputs) {
+    tmp_bcast[inblk->device_group_id] = inblk->entry;
+  }
+  BroadcastEntries(src_dev, tgt_dev, shape, &tmp_bcast);
+  // Copy the broadcast result to the outputs.
   for (Block* outblk : outputs) {
-    bool find = false;
-    // Prioritize local fetch.
-    for (const Block* inblk : inputs) {
-      if (inblk->device_group_id == outblk->device_group_id) {
-        outblk->entry = inblk->entry;
-        find = true;
-        break;
-      }
-    }
-    if (!find) {
-      outblk->entry = inputs[fetch_idx]->entry;
-      fetch_idx = (fetch_idx + 1) % inputs.size();
-    }
+    outblk->entry = tmp_bcast[outblk->device_group_id];
   }
 }
 
@@ -1290,7 +1396,7 @@ void GraphPartitioner::AllReduce(const Grid& input, Grid* output) {
     if (input.replicate_is_reduction()) {
       AllReduceBlocks(input_blocks, output_blocks, input.block_shape());
     } else {
-      AllShuffleBlocks(input_blocks, output_blocks);
+      AllShuffleBlocks(input_blocks, output_blocks, input.block_shape());
     }
   } while(iter.Next());
 }
@@ -1305,6 +1411,8 @@ void GraphPartitioner::ConvertGrid(const Grid& from, Grid* to) {
     *to = from;
     return;
   }
+  //LOG(INFO) << "Convert from: " << from.num_blocks() << "x" << from.num_replicates()
+    //<< " to " << to->num_blocks() << "x" << to->num_replicates();
 
   // Three phase conversion: split + allreduce/shuffle + concat
   // Note that the split is implemented by _backward_Concat.

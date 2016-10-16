@@ -93,13 +93,13 @@ Graph PartitionPass(Graph src) {
   //nnlvls.Print();
 
   // Cut algorithm.
-  CutAlgorithm algo(&src, nnlvls, groups);
+  CutAlgorithm algo(&src, nnlvls, groups, num_devices);
   cost_t total_cost = algo.KCuts(num_cuts);
   algo.Print();
   LOG(INFO) << "Total K-cuts cost: " << total_cost;
 
   // Graph partitioner.
-  GraphPartitioner pttn(algo, &src);
+  GraphPartitioner pttn(algo, &src, CommPlanner::kDefaultPlanner);
 
   //return src;
   return pttn.Run();

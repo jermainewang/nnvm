@@ -163,13 +163,25 @@ Graph PlaceDevice(Graph src) {
     // or we could just reuse the original node in the new graph.
     bool require_new_node = false;
     
-    // Loop all the node's input entry. If the input is not placed on the same
-    // device with this node or its input node is a new node, we need to create a
-    // new node to represent this node in the new graph.
-    for (const auto& e : inode.inputs) {
-      if (new_node_map[e.node_id] != nullptr || dev_id != device[e.node_id]) {
-        require_new_node = true;
-        break;
+    // If this node is not a copy node. Loop all the node's input entry.
+    // If the input is not placed on the same device with this node, we need to
+    // create a new node to represent this node in the new graph.
+    if (inode.source->op() != copy_op) {
+      for (const auto& e : inode.inputs) {
+        if (dev_id != device[e.node_id]) {
+          require_new_node = true;
+          break;
+        }
+      }
+    }
+    // Loop all the node's input entries. If any of its inputs is a new node,
+    // also create a new node for this.
+    if (!require_new_node) {
+      for (const auto& e : inode.inputs) {
+        if (new_node_map[e.node_id] != nullptr) {
+          require_new_node = true;
+          break;
+        }
       }
     }
     // Loop all the node's control dependencies. If its dependent node is a new
@@ -196,7 +208,7 @@ Graph PlaceDevice(Graph src) {
         const NodeEntry& new_in_ent = new_node_map[in_ent.node_id]?
           NodeEntry{new_node_map[in_ent.node_id], in_ent.index, 0} :
           inode.source->inputs[i];
-        if (dev_id != device[in_ent.node_id]) {
+        if (dev_id != device[in_ent.node_id] && inode.source->op() != copy_op) {
           // Input device and node device is different. Insert copy node.
           auto copy_key = std::make_tuple(in_ent.node_id, in_ent.index, dev_id);
           auto it = copy_map.find(copy_key);
@@ -225,7 +237,7 @@ Graph PlaceDevice(Graph src) {
                 NodeEntry{std::move(copy_node), 0, 0});
           }
         } else {
-          // Connect new node to the input entry.
+          // Simply connect new node to the input entry.
           new_node->inputs.push_back(new_in_ent);
         }
       }
@@ -270,7 +282,7 @@ Graph PlaceDevice(Graph src) {
   }
   ret.attrs["device"] = std::make_shared<any>(std::move(new_device_vec));
 
-  /*cout << "digraph {" << endl;
+  cout << "digraph {" << endl;
   const auto& retidx = ret.indexed_graph();
   for (uint32_t nid = 0; nid < retidx.num_nodes(); ++nid) {
     const auto& n = retidx[nid];
@@ -279,7 +291,7 @@ Graph PlaceDevice(Graph src) {
            << " -> n" << nid << "_" << n.source->attrs.name << endl;
     }
   }
-  cout << "}" << endl;*/
+  cout << "}" << endl;
 
   return ret;
 }

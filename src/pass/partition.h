@@ -15,6 +15,8 @@
 #include <queue>
 #include <sstream>
 
+#include "./allreduce.h"
+
 namespace nnvm {
 namespace pass {
 
@@ -229,7 +231,9 @@ struct DPState {
 class CutAlgorithm {
  public:
   // Constructor.
-  CutAlgorithm(Graph* src, const Levels& levels, const NodeEntryGroups& groups);
+  CutAlgorithm(Graph* src, const Levels& levels,
+               const NodeEntryGroups& groups,
+               size_t num_devices);
 
   // One cut algorithm. Return the minimal cost.
   cost_t OneCut();
@@ -248,6 +252,8 @@ class CutAlgorithm {
 
   // Print debug information.
   void Print() const;
+
+  size_t num_devices() const { return num_devices_; }
 
  private:
   // Init all DP states. Create auxiliary structures for the main algorithm.
@@ -274,6 +280,7 @@ class CutAlgorithm {
   Graph* src_graph_;
   const Levels& levels_;
   const NodeEntryGroups& entry_groups_;
+  const size_t num_devices_;
 
   std::vector<std::vector<DPOp>> dp_operators_;
   std::vector<std::vector<DPEntry>> dp_entries_;
@@ -347,7 +354,11 @@ class Grid {
 
 class GraphPartitioner {
  public:
-  GraphPartitioner(const CutAlgorithm& algo, Graph* src): algo_(algo), src_graph_(src) {}
+  GraphPartitioner(const CutAlgorithm& algo, Graph* src,
+      const std::string& comm_name):
+    algo_(algo), src_graph_(src), num_devices_(algo.num_devices()) {
+    comm_planner_ = CommPlanner::CreatePlanner(comm_name);
+  }
 
   Graph Run();
 
@@ -361,12 +372,16 @@ class GraphPartitioner {
                         const std::string& name, size_t dim,
                         size_t device_group_id);
 
+  void BroadcastEntries(const std::vector<int>& src_dev, const std::vector<int>& tgt_dev,
+                        const TShape& shape, std::vector<NodeEntry>* dev_entries);
+
   void AllReduceBlocks(const std::vector<const Block*>& inputs,
                        const std::vector<Block*>& outputs,
                        const TShape& shape);
 
   void AllShuffleBlocks(const std::vector<const Block*>& inputs,
-                        const std::vector<Block*>& outputs);
+                        const std::vector<Block*>& outputs,
+                        const TShape& shape);
 
   void AllReduce(const Grid& input, Grid* output);
 
@@ -384,6 +399,8 @@ class GraphPartitioner {
 
   const CutAlgorithm& algo_;
   Graph* src_graph_;
+  std::unique_ptr<CommPlanner> comm_planner_;
+  const size_t num_devices_;
 
   std::unordered_map<NodePtr, std::vector<TShape>> node_output_shapes_;
 };
