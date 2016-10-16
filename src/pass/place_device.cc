@@ -282,7 +282,7 @@ Graph PlaceDevice(Graph src) {
   }
   ret.attrs["device"] = std::make_shared<any>(std::move(new_device_vec));
 
-  cout << "digraph {" << endl;
+  /*cout << "digraph {" << endl;
   const auto& retidx = ret.indexed_graph();
   for (uint32_t nid = 0; nid < retidx.num_nodes(); ++nid) {
     const auto& n = retidx[nid];
@@ -291,7 +291,7 @@ Graph PlaceDevice(Graph src) {
            << " -> n" << nid << "_" << n.source->attrs.name << endl;
     }
   }
-  cout << "}" << endl;
+  cout << "}" << endl;*/
 
   return ret;
 }
