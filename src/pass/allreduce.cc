@@ -206,7 +206,7 @@ class SimpleCommPlanner : public CommPlanner {
       oss << src << " ";
     }
     oss << "] -> " << target;
-    LOG(INFO) << oss.str();
+    //LOG(INFO) << oss.str();
     oss << "\nPlan:\n";
     for (size_t i = 0; i < stages.size(); ++i) {
       oss << "\tStage #" << i << ": ";
@@ -235,7 +235,7 @@ class SimpleCommPlanner : public CommPlanner {
       oss << tgt << " ";
     }
     oss << "]";
-    LOG(INFO) << oss.str();
+    //LOG(INFO) << oss.str();
     oss << "\nPlan:\n";
     for (size_t i = 0; i < stages.size(); ++i) {
       oss << "\tStage #" << i << ": ";
