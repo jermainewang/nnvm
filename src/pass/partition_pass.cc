@@ -87,25 +87,39 @@ Graph PartitionPass(Graph src) {
   //BFS bfs(&src, &groups);
   //bfs.Run(start_node_id);
   //bfs.Print();
+  // TODO(minjie): chaos ownership
+  NeuralLevels nnlvls(&src, &groups);
+  nnlvls.Run();
+  nnlvls.Print();
 
-  // Cut algorithm.
-  //NeuralLevels nnlvls(&src, &groups);
-  //nnlvls.Run();
-  //nnlvls.Print();
-  //CutAlgorithm tiling(&src, nnlvls, groups);
-  //cost_t total_cost = tiling.KCuts(num_cuts);
-  //tiling.Print();
-  //LOG(INFO) << "Total K-cuts cost: " << total_cost;
-  
-  // Data parallelism
-  DataParallelism tiling(&src, groups, num_devices);
+  string tiling_type = dmlc::GetEnv("TOFU_TILING_TYPE", string("kcuts"));
+  Tiling* tiling = nullptr;
+
+  if (tiling_type == "kcuts") {
+    
+    // Cut algorithm.
+    CutAlgorithm* algo = new CutAlgorithm(&src, nnlvls, groups);
+    cost_t total_cost = algo->KCuts(num_cuts);
+    algo->Print();
+    LOG(INFO) << "Total K-cuts cost: " << total_cost;
+    tiling = algo;
+  } else if (tiling_type == "datapar") {
+    // Data parallelism
+    tiling = new DataParallelism(&src, groups, num_devices);
+  } else if (tiling_type == "modelpar") {
+    // Model parallelism
+    tiling = new ModelParallelism(&src, groups, num_devices);
+  }
 
   // Graph partitioner.
-  GraphPartitioner pttn(
-      tiling, &src, CommPlanner::kDefaultPlanner, num_devices);
+  CHECK_NOTNULL(tiling);
+  GraphPartitioner pttn(*tiling, &src, CommPlanner::kDefaultPlanner, num_devices);
 
   //return src;
-  return pttn.Run();
+  const Graph& ret = pttn.Run();
+
+  delete tiling;
+  return ret;
 }
 
 NNVM_REGISTER_PASS(PartitionPass)

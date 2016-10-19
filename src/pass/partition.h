@@ -230,6 +230,7 @@ struct DPState {
 
 class Tiling {
  public:
+  virtual ~Tiling() = default;
   // Get schemes of a node entry.
   virtual const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const = 0;
   // Get scheme requests of the given node.

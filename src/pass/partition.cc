@@ -679,6 +679,7 @@ void ManualTiling::ChooseSchemeRequests() {
     src_graph_->GetAttr<ShapeVector>("shape");
   chosen_scheme_requests_.resize(idxgraph.num_nodes());
   aligned_scheme_requests_.resize(idxgraph.num_nodes());
+  cost_t total_cost = 0;
   for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
     const Node* node = idxgraph[nodeid].source;
     if (node->is_variable()) {
@@ -736,17 +737,19 @@ void ManualTiling::ChooseSchemeRequests() {
     }
     LOG(INFO) << "Node #" << nodeid << " " << node->attrs.name << " choose " << chosen;
     chosen_scheme_requests_[nodeid] = vector<size_t>(num_cuts_, chosen);
+    total_cost += best_cost;
   }
+  LOG(INFO) << "Estimated communication cost (2 nodes): " << total_cost;
 }
 
 DataParallelism::DataParallelism(Graph* src, const NodeEntryGroups& groups, size_t num_devices):
   ManualTiling(src, groups, num_devices) {
   param_schemes_ = vector<Scheme>(num_cuts_, Scheme::Rep());
   other_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(0));
-  // TODO
+  // TODO(minjie): bias, batch_norm, etc.
   const IndexedGraph& idxgraph = src_graph_->indexed_graph();
   entry_schemes_.resize(idxgraph.num_node_entries(), &other_schemes_);
-  for (uint32_t nodeid = 0; nodeid < idxgraph.num_node_entries(); ++nodeid) {
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
     const Node* node = idxgraph[nodeid].source;
     if (node->is_variable() && EndsWith(node->attrs.name, "_weight")) {
       const uint32_t entid = idxgraph.entry_id(nodeid, 0);
@@ -770,7 +773,31 @@ ModelParallelism::ModelParallelism(Graph* src, const NodeEntryGroups& groups, si
   param_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(1));
   activation_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(1));
   other_schemes_ = vector<Scheme>(num_cuts_, Scheme::Rep());
-  // TODO
+  // TODO (minjie): bias, batch_norm, etc.
+  // TODO (minjie): _plus, _sum_grad, etc.
+  const IndexedGraph& idxgraph = src_graph_->indexed_graph();
+  entry_schemes_.resize(idxgraph.num_node_entries(), &other_schemes_);
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
+    const Node* node = idxgraph[nodeid].source;
+    if (node->is_variable()) {
+      if (EndsWith(node->attrs.name, "_weight")) {
+        const uint32_t entid = idxgraph.entry_id(nodeid, 0);
+        const uint32_t ent_gid = entry_groups_.group_id(entid);
+        for (const uint32_t id : entry_groups_[ent_gid]) {
+          LOG(INFO) << "Find parameter entry: #" << id;
+          entry_schemes_[id] = &param_schemes_;
+        }
+      }
+    } else if (!EndsWith(node->attrs.name, "_backward")) {
+      CHECK_EQ(node->num_outputs(), 1);
+      const uint32_t entid = idxgraph.entry_id(nodeid, 0);
+      const uint32_t ent_gid = entry_groups_.group_id(entid);
+      for (const uint32_t id : entry_groups_[ent_gid]) {
+        LOG(INFO) << "Find activation entry: #" << id;
+        entry_schemes_[id] = &activation_schemes_;
+      }
+    }
+  }
 
   this->ChooseSchemeRequests();
 }
