@@ -203,7 +203,8 @@ Graph PlanMemory(Graph ret) {
       // if we decrease it to zero, means we are ready to relase
       --ref_count[eid];
       if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
-        allocator.Release(storage[eid], nid);
+        // TODO(minjie): bug here, current workaround
+        //allocator.Release(storage[eid], nid);
       }
     }
     // check if there are outputs that can be freeded immediately
@@ -211,7 +212,8 @@ Graph PlanMemory(Graph ret) {
     for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
       const uint32_t eid = idx.entry_id(nid, index);
       if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
-        allocator.Release(storage[eid], nid);
+        // TODO(minjie): bug here, current workaround
+        //allocator.Release(storage[eid], nid);
         // use -2 to indicate that the node was never touched.
         storage_inplace_index[eid] = -2;
       }

@@ -448,13 +448,13 @@ NeuralLevels::NeuralLevels(Graph* src, const NodeEntryGroups* groups):
     nodeid2group_[nodeid] = groupid;
     node_groups_[groupid].push_back(nodeid);
   }
-  for (size_t i = 0; i < node_groups_.size(); ++i) {
+  /*for (size_t i = 0; i < node_groups_.size(); ++i) {
     LOG(INFO) << "Group #" << i << ": {";
     for (uint32_t nodeid : node_groups_[i]) {
       LOG(INFO) << "\t#" << nodeid << ": " << graph[nodeid].source->attrs.name << ",";
     }
     LOG(INFO) << "}";
-  }
+  }*/
   // Following is the same as in BFS. Create undirected graph from original graph.
   entry_to_nodes_.resize(graph.num_node_entries());
   node_to_entries_.resize(graph.num_nodes());
@@ -873,7 +873,7 @@ void CutAlgorithm::Init() {
       // Create new state for each scheme combinations of the entries in this level.
       dp_states_[i].emplace_back(schemes);
     }
-    LOG(INFO) << "DP Level #" << i << " size=" << dp_states_[i].size();
+    //LOG(INFO) << "DP Level #" << i << " size=" << dp_states_[i].size();
   }
 }
 
@@ -908,8 +908,11 @@ cost_t CutAlgorithm::OneCut() {
     }
   }
   // Do DP.
+  const size_t log_step = dp_states_.size() / 10;
   for (size_t i = 1; i < dp_states_.size(); ++i) {
-    LOG(INFO) << "Running DP #" << i;
+    if (i % log_step == 0) {
+      LOG(INFO) << "DP Finished " << 10.0 * i / log_step << "%";
+    }
     for (size_t j = 0; j < dp_states_[i].size(); ++j) {
       DPState& next_state = dp_states_[i][j];
       // Compute minimal cost to reach this state by looping all possible previous states.
@@ -1795,7 +1798,7 @@ Graph GraphPartitioner::Run() {
   ShapeVector new_shapes(retgraph.num_node_entries());
   DFSVisit(ret.outputs, [&] (const NodePtr& node) {
     const uint32_t nodeid = retgraph.node_id(node.get());
-    LOG(INFO) << "Node #" << nodeid << ": " << node->attrs.name;
+    //LOG(INFO) << "Node #" << nodeid << ": " << node->attrs.name;
     CHECK_EQ(node_output_shapes_.at(node).size(), node->num_outputs())
       << node_output_shapes_.at(node).size() << " " << node->num_outputs();
     for (size_t idx = 0; idx < node->num_outputs(); ++idx) {
@@ -1813,13 +1816,13 @@ Graph GraphPartitioner::Run() {
   DTypeVector new_dtypes(retgraph.num_node_entries(), 0);
 
   // Device information.
-  DFSVisit(ret.outputs, [&](const NodePtr& node) {
+  /*DFSVisit(ret.outputs, [&](const NodePtr& node) {
     if (node->attrs.dict.count("ctx_group") != 0) {
       LOG(INFO) << node->attrs.name << " on device: " << node->attrs.dict.at("ctx_group");
     } else {
       LOG(INFO) << node->attrs.name << " on device: unknown";
     }
-  });
+  });*/
 
   ret.attrs["shape"] = std::make_shared<any>(std::move(new_shapes));
   ret.attrs["dtype"] = std::make_shared<any>(std::move(new_dtypes));

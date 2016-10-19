@@ -170,7 +170,7 @@ Graph Gradient(Graph src) {
       const uint32_t backward_entid = idxgraph.entry_id(map_pair.second[i].sum);
       forward2backward[forward_entid] = backward_entid;
       backward2forward[backward_entid] = forward_entid;
-      LOG(INFO) << "Map between: " << forward_entid << " and " << backward_entid;
+      //LOG(INFO) << "Map between: " << forward_entid << " and " << backward_entid;
     }
   }
   ret.attrs["forward2backward"] = std::make_shared<any>(std::move(forward2backward));
