@@ -908,11 +908,11 @@ cost_t CutAlgorithm::OneCut() {
     }
   }
   // Do DP.
-  const size_t log_step = dp_states_.size() / 10;
+  //const size_t log_step = dp_states_.size() / 10;
   for (size_t i = 1; i < dp_states_.size(); ++i) {
-    if (i % log_step == 0) {
-      LOG(INFO) << "DP Finished " << 10.0 * i / log_step << "%";
-    }
+    //if (i % log_step == 0) {
+      LOG(INFO) << "DP Finished " << i;
+    //}
     for (size_t j = 0; j < dp_states_[i].size(); ++j) {
       DPState& next_state = dp_states_[i][j];
       // Compute minimal cost to reach this state by looping all possible previous states.
