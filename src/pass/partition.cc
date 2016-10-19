@@ -762,6 +762,20 @@ DataParallelism::DataParallelism(Graph* src, const NodeEntryGroups& groups, size
   }
   
   this->ChooseSchemeRequests();
+
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
+    const Node* node = idxgraph[nodeid].source;
+    if (node->is_variable()) continue;
+    if (node->op()->name == "FullyConnected"
+        || node->op()->name == "Convolution") {
+      chosen_scheme_requests_[nodeid] = std::vector<size_t>(num_cuts_, 0);
+    } else if (node->op()->name == "_backward_FullyConnected"
+        || node->op()->name == "_backward_Convolution") {
+      chosen_scheme_requests_[nodeid] = std::vector<size_t>(num_cuts_, 2);
+    }
+    LOG(INFO) << "Overwrite Node #" << nodeid << " " << node->attrs.name
+      << " to choose " << chosen_scheme_requests_[nodeid][0];
+  }
 }
 
 const std::vector<Scheme>& DataParallelism::GetEntrySchemes(uint32_t entry_id) const {
@@ -800,6 +814,20 @@ ModelParallelism::ModelParallelism(Graph* src, const NodeEntryGroups& groups, si
   }
 
   this->ChooseSchemeRequests();
+
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
+    const Node* node = idxgraph[nodeid].source;
+    if (node->is_variable()) continue;
+    if (node->op()->name == "FullyConnected"
+        || node->op()->name == "Convolution") {
+      chosen_scheme_requests_[nodeid] = std::vector<size_t>(num_cuts_, 2);
+    } else if (node->op()->name == "_backward_FullyConnected"
+        || node->op()->name == "_backward_Convolution") {
+      chosen_scheme_requests_[nodeid] = std::vector<size_t>(num_cuts_, 1);
+    }
+    LOG(INFO) << "Overwrite Node #" << nodeid << " " << node->attrs.name
+      << " to choose " << chosen_scheme_requests_[nodeid][0];
+  }
 }
 
 const std::vector<Scheme>& ModelParallelism::GetEntrySchemes(uint32_t entry_id) const {
