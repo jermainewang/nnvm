@@ -83,6 +83,21 @@ nnvm::TShape min(const nnvm::TShape& shp1, const nnvm::TShape& shp2) {
 namespace nnvm {
 namespace pass {
 namespace {
+inline bool EndsWith(const string& value, const string& ending) {
+  if (ending.size() > value.size()) return false;
+  return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+}
+int _GetNumCuts(int num_devices) {
+  CHECK_GT(num_devices, 1) << "Must have more than two devices.";
+  int num_cut = 0;
+  while(num_devices > 1) {
+    CHECK_EQ(num_devices % 2, 0)
+      << "Currently only support number of devices equal to 2^x";
+    num_devices /= 2;
+    ++num_cut;
+  }
+  return num_cut;
+}
 string GetPrefix(const string& str) {
   // TODO(minjie): Very ugly way of getting forward op name.
   string ret;
@@ -649,10 +664,124 @@ cost_t Region::ConvertCost2(const Region& r1, const Scheme& sch1,
   return cost;
 }
 
+ManualTiling::ManualTiling(Graph* src, const NodeEntryGroups& groups, size_t num_devices):
+  src_graph_(src), num_devices_(num_devices),
+  entry_groups_(groups),
+  num_cuts_(_GetNumCuts(num_devices)) {
+}
+
+void ManualTiling::ChooseSchemeRequests() {
+  // TODO
+  const IndexedGraph& idxgraph = src_graph_->indexed_graph();
+  const OpMap<FAlignedSchemes>& align_map =
+    Op::GetAttr<FAlignedSchemes>("FAlignedSchemes");
+  const ShapeVector& shapes =
+    src_graph_->GetAttr<ShapeVector>("shape");
+  chosen_scheme_requests_.resize(idxgraph.num_nodes());
+  aligned_scheme_requests_.resize(idxgraph.num_nodes());
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_nodes(); ++nodeid) {
+    const Node* node = idxgraph[nodeid].source;
+    if (node->is_variable()) {
+      continue;
+    }
+    // Choose inputs/outputs schemes and shapes.
+    vector<Scheme> in_schemes(node->inputs.size());
+    vector<Scheme> out_schemes(node->num_outputs());
+    vector<TShape> in_shapes(node->inputs.size());
+    vector<TShape> out_shapes(node->num_outputs());
+    for (size_t i = 0; i < node->inputs.size(); ++i) {
+      const uint32_t in_ent_id = idxgraph.entry_id(node->inputs[i]);
+      // TODO only pick the first scheme.
+      in_schemes[i] = this->GetEntrySchemes(in_ent_id)[0];
+      in_shapes[i] = shapes[in_ent_id];
+    }
+    for (size_t i = 0; i < node->num_outputs(); ++i) {
+      const uint32_t out_ent_id = idxgraph.entry_id(nodeid, i);
+      // TODO only pick the first scheme.
+      out_schemes[i] = this->GetEntrySchemes(out_ent_id)[0];
+      out_shapes[i] = shapes[out_ent_id];
+    }
+
+    // Get aligned scheme request.
+    CHECK_NOTNULL(node->op());
+    FAlignedSchemes align_func = align_map[node->op()];
+    aligned_scheme_requests_[nodeid] = align_func(node->attrs, in_shapes, out_shapes);
+
+    // Choose best aligned scheme.
+    cost_t best_cost = std::numeric_limits<cost_t>::max();
+    size_t chosen = 0;
+    for (size_t i = 0; i < aligned_scheme_requests_[nodeid].size(); ++i) {
+      cost_t cost = 0;
+      const auto& align = aligned_scheme_requests_[nodeid][i];
+      // Input conversion.
+      for (size_t j = 0; j < node->inputs.size(); ++j) {
+        Region reg(in_shapes[j]);
+        cost += Region::ConvertCost2(reg,
+                                     in_schemes[j],
+                                     reg,
+                                     align.input_schemes[j]);
+      }
+      // Output conversion.
+      for (size_t j = 0; j < node->num_outputs(); ++j) {
+        Region reg(out_shapes[j]);
+        cost += Region::ConvertCost2(reg,
+                                     align.output_schemes[j],
+                                     reg,
+                                     out_schemes[j]);
+      }
+      if (cost < best_cost) {
+        best_cost = cost;
+        chosen = i;
+      }
+    }
+    LOG(INFO) << "Node #" << nodeid << " " << node->attrs.name << " choose " << chosen;
+    chosen_scheme_requests_[nodeid] = vector<size_t>(num_cuts_, chosen);
+  }
+}
+
+DataParallelism::DataParallelism(Graph* src, const NodeEntryGroups& groups, size_t num_devices):
+  ManualTiling(src, groups, num_devices) {
+  param_schemes_ = vector<Scheme>(num_cuts_, Scheme::Rep());
+  other_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(0));
+  // TODO
+  const IndexedGraph& idxgraph = src_graph_->indexed_graph();
+  entry_schemes_.resize(idxgraph.num_node_entries(), &other_schemes_);
+  for (uint32_t nodeid = 0; nodeid < idxgraph.num_node_entries(); ++nodeid) {
+    const Node* node = idxgraph[nodeid].source;
+    if (node->is_variable() && EndsWith(node->attrs.name, "_weight")) {
+      const uint32_t entid = idxgraph.entry_id(nodeid, 0);
+      const uint32_t ent_gid = entry_groups_.group_id(entid);
+      for (const uint32_t id : entry_groups_[ent_gid]) {
+        LOG(INFO) << "Find parameter entry: #" << id;
+        entry_schemes_[id] = &param_schemes_;
+      }
+    }
+  }
+  
+  this->ChooseSchemeRequests();
+}
+
+const std::vector<Scheme>& DataParallelism::GetEntrySchemes(uint32_t entry_id) const {
+  return *entry_schemes_[entry_id];
+}
+
+ModelParallelism::ModelParallelism(Graph* src, const NodeEntryGroups& groups, size_t num_devices):
+  ManualTiling(src, groups, num_devices) {
+  param_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(1));
+  activation_schemes_ = vector<Scheme>(num_cuts_, Scheme::Cut(1));
+  other_schemes_ = vector<Scheme>(num_cuts_, Scheme::Rep());
+  // TODO
+
+  this->ChooseSchemeRequests();
+}
+
+const std::vector<Scheme>& ModelParallelism::GetEntrySchemes(uint32_t entry_id) const {
+  return *entry_schemes_[entry_id];
+}
+
 CutAlgorithm::CutAlgorithm(Graph* src, const Levels& levels,
-                           const NodeEntryGroups& groups,
-                           size_t num_devices):
-  src_graph_(src), levels_(levels), entry_groups_(groups), num_devices_(num_devices) {
+                           const NodeEntryGroups& groups):
+  src_graph_(src), levels_(levels), entry_groups_(groups) {
   const IndexedGraph& idxgraph = src->indexed_graph();
   const OpMap<FAlignedSchemes>& align_map =
     Op::GetAttr<FAlignedSchemes>("FAlignedSchemes");
@@ -1510,7 +1639,7 @@ Graph GraphPartitioner::Run() {
   for (uint32_t entid = 0; entid < graph.num_node_entries(); ++entid) {
     //LOG(INFO) << "Split entry#" << entid;
     const TShape& shape = shapes[entid];
-    const vector<Scheme>& schemes = algo_.GetEntrySchemes(entid);
+    const vector<Scheme>& schemes = tiling_.GetEntrySchemes(entid);
     entry_grids.emplace_back(shape, schemes);
   }
   DFSVisit( src_graph_->outputs, [&](const NodePtr& node) {
@@ -1542,8 +1671,8 @@ Graph GraphPartitioner::Run() {
       }
       return;
     }
-    const vector<SchemeRequest>& allreqs = algo_.GetSchemeRequests(nodeid);
-    const vector<size_t>& chosen = algo_.GetChosenSchemeRequests(nodeid);
+    const vector<SchemeRequest>& allreqs = tiling_.GetSchemeRequests(nodeid);
+    const vector<size_t>& chosen = tiling_.GetChosenSchemeRequests(nodeid);
     const size_t num_inputs = allreqs[0].input_schemes.size();
     const size_t num_outputs = allreqs[0].output_schemes.size();
     vector<vector<Scheme>> input_schemes(num_inputs), output_schemes(num_outputs);

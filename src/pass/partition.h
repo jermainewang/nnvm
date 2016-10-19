@@ -228,12 +228,64 @@ struct DPState {
   explicit DPState(const std::vector<Scheme>& schemes): schemes(schemes) {}
 };
 
-class CutAlgorithm {
+class Tiling {
+ public:
+  // Get schemes of a node entry.
+  virtual const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const = 0;
+  // Get scheme requests of the given node.
+  virtual const std::vector<SchemeRequest>& GetSchemeRequests(uint32_t node_id) const = 0;
+  // Get scheme requests chosen for the given node.
+  virtual const std::vector<size_t>& GetChosenSchemeRequests(uint32_t node_id) const = 0;
+};
+
+class ManualTiling : public Tiling {
+ public:
+  ManualTiling(Graph* src, const NodeEntryGroups& groups, size_t num_devices);
+  const std::vector<size_t>& GetChosenSchemeRequests(uint32_t node_id) const override {
+    return chosen_scheme_requests_.at(node_id);
+  }
+  const std::vector<SchemeRequest>& GetSchemeRequests(uint32_t node_id) const override {
+    return aligned_scheme_requests_.at(node_id);
+  }
+ protected:
+  void ChooseSchemeRequests();
+  Graph* src_graph_;
+  const NodeEntryGroups& entry_groups_;
+  const size_t num_devices_;
+  const size_t num_cuts_;
+
+  std::vector<std::vector<SchemeRequest>> aligned_scheme_requests_;
+  std::vector<std::vector<size_t>> chosen_scheme_requests_;
+};
+
+class DataParallelism : public ManualTiling {
+ public:
+  DataParallelism(Graph* src, const NodeEntryGroups& groups, size_t num_devices);
+  const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const override;
+  
+ private:
+  std::vector<Scheme> param_schemes_;
+  std::vector<Scheme> other_schemes_;
+  std::vector<std::vector<Scheme>*> entry_schemes_;
+};
+
+class ModelParallelism : public ManualTiling {
+ public:
+  ModelParallelism(Graph* src, const NodeEntryGroups& groups, size_t num_devices);
+  const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const override;
+
+ private:
+  std::vector<Scheme> param_schemes_;
+  std::vector<Scheme> activation_schemes_;
+  std::vector<Scheme> other_schemes_;
+  std::vector<std::vector<Scheme>*> entry_schemes_;
+};
+
+class CutAlgorithm : public Tiling {
  public:
   // Constructor.
   CutAlgorithm(Graph* src, const Levels& levels,
-               const NodeEntryGroups& groups,
-               size_t num_devices);
+               const NodeEntryGroups& groups);
 
   // One cut algorithm. Return the minimal cost.
   cost_t OneCut();
@@ -242,18 +294,16 @@ class CutAlgorithm {
   cost_t KCuts(uint32_t K);
 
   // Get schemes of a node entry.
-  const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const;
+  const std::vector<Scheme>& GetEntrySchemes(uint32_t entry_id) const override;
   
   // Get scheme requests of the given node.
-  const std::vector<SchemeRequest>& GetSchemeRequests(uint32_t node_id) const;
+  const std::vector<SchemeRequest>& GetSchemeRequests(uint32_t node_id) const override;
 
   // Get scheme requests chosen for the given node.
-  const std::vector<size_t>& GetChosenSchemeRequests(uint32_t node_id) const;
+  const std::vector<size_t>& GetChosenSchemeRequests(uint32_t node_id) const override;
 
   // Print debug information.
   void Print() const;
-
-  size_t num_devices() const { return num_devices_; }
 
  private:
   // Init all DP states. Create auxiliary structures for the main algorithm.
@@ -280,7 +330,6 @@ class CutAlgorithm {
   Graph* src_graph_;
   const Levels& levels_;
   const NodeEntryGroups& entry_groups_;
-  const size_t num_devices_;
 
   std::vector<std::vector<DPOp>> dp_operators_;
   std::vector<std::vector<DPEntry>> dp_entries_;
@@ -354,9 +403,9 @@ class Grid {
 
 class GraphPartitioner {
  public:
-  GraphPartitioner(const CutAlgorithm& algo, Graph* src,
-      const std::string& comm_name):
-    algo_(algo), src_graph_(src), num_devices_(algo.num_devices()) {
+  GraphPartitioner(const Tiling& tiling, Graph* src,
+      const std::string& comm_name, size_t num_devices):
+    tiling_(tiling), src_graph_(src), num_devices_(num_devices) {
     comm_planner_ = CommPlanner::CreatePlanner(comm_name);
   }
 
@@ -397,7 +446,7 @@ class GraphPartitioner {
                  const std::vector<Grid*>& outputs,
                  const std::vector<NodePtr>& nodes);
 
-  const CutAlgorithm& algo_;
+  const Tiling& tiling_;
   Graph* src_graph_;
   std::unique_ptr<CommPlanner> comm_planner_;
   const size_t num_devices_;

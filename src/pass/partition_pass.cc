@@ -88,18 +88,21 @@ Graph PartitionPass(Graph src) {
   //bfs.Run(start_node_id);
   //bfs.Print();
 
-  NeuralLevels nnlvls(&src, &groups);
-  nnlvls.Run();
-  //nnlvls.Print();
-
   // Cut algorithm.
-  CutAlgorithm algo(&src, nnlvls, groups, num_devices);
-  cost_t total_cost = algo.KCuts(num_cuts);
-  algo.Print();
-  LOG(INFO) << "Total K-cuts cost: " << total_cost;
+  //NeuralLevels nnlvls(&src, &groups);
+  //nnlvls.Run();
+  //nnlvls.Print();
+  //CutAlgorithm tiling(&src, nnlvls, groups);
+  //cost_t total_cost = tiling.KCuts(num_cuts);
+  //tiling.Print();
+  //LOG(INFO) << "Total K-cuts cost: " << total_cost;
+  
+  // Data parallelism
+  DataParallelism tiling(&src, groups, num_devices);
 
   // Graph partitioner.
-  GraphPartitioner pttn(algo, &src, CommPlanner::kDefaultPlanner);
+  GraphPartitioner pttn(
+      tiling, &src, CommPlanner::kDefaultPlanner, num_devices);
 
   //return src;
   return pttn.Run();
