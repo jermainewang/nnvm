@@ -8,13 +8,43 @@
 
 #include <vector>
 #include <functional>
+#include <memory>
 #include "./base.h"
 #include "./graph.h"
 
 namespace nnvm {
 
 /*!
- * \brief A PassFunction is an "Operator on Graph".
+ * \brief Apply a series of pass transformations on the input graph.
+ * \param src The graph to be transformed.
+ * \param passes A list of pass names to be applied.
+ * \return The transformed graph
+ */
+//Graph ApplyPasses(Graph src,
+                  //const std::vector<std::string>& passes);
+
+/*!
+ * \brief Apply one pass to the graph.
+ * \param src The graph to be transformed.
+ * \param pass The name of pass to be applied.
+ * \return The transformed graph.
+ */
+//inline Graph ApplyPass(Graph src, const std::string& pass) {
+  //return ApplyPasses(src, {pass});
+//}
+
+struct PassResult {
+  Graph graph;
+  std::vector<uint32_t> node_remapping;
+  std::vector<uint32_t> entry_remapping;
+};
+
+struct PassArgument {
+  std::vector<std::string, any> kwargs;
+};
+
+/*!
+ * \brief A PassCreator is an "Operator on Graph".
  *  It takes a source graph and return a graph that may or may
  *  not be the same as the input one.
  *
@@ -24,34 +54,21 @@ namespace nnvm {
  * \param src The graph to be transformed.
  * \return The generated graph.
  */
-typedef std::function<Graph (Graph src)> PassFunction;
+class Pass {
+ public:
+  virtual void Setup() = 0;
+  virtual PassResult RunOnGraph(Graph src, const PassArgument& args) = 0;
+  virtual void Finalize() = 0;
+};
 
-/*!
- * \brief Apply a series of pass transformations on the input graph.
- * \param src The graph to be transformed.
- * \param passes A list of pass names to be applied.
- * \return The transformed graph
- */
-Graph ApplyPasses(Graph src,
-                  const std::vector<std::string>& passes);
-
-/*!
- * \brief Apply one pass to the graph.
- * \param src The graph to be transformed.
- * \param pass The name of pass to be applied.
- * \return The transformed graph.
- */
-inline Graph ApplyPass(Graph src, const std::string& pass) {
-  return ApplyPasses(src, {pass});
-}
-
+typedef std::function<std::unique_ptr<Pass> ()> PassCreator;
 
 /*!
  * \brief Registry entry for DataIterator factory functions.
  */
-struct PassFunctionReg
-    : public dmlc::FunctionRegEntryBase<PassFunctionReg,
-                                        PassFunction> {
+struct PassCreatorReg
+    : public dmlc::FunctionRegEntryBase<PassCreatorReg,
+                                        PassCreator> {
   /*!
    * \brief Whether the pass will change graph structure
    *  If this is false, the pass will only change attributes.
@@ -68,7 +85,7 @@ struct PassFunctionReg
    * \param v If true, the pass will change graph structure.
    * \return Reference to self.
    */
-  PassFunctionReg& set_change_graph(bool v) {  // NOLINT(*)
+  PassCreatorReg& set_change_graph(bool v) {  // NOLINT(*)
     change_graph = v;
     return *this;
   }
@@ -78,7 +95,7 @@ struct PassFunctionReg
    * \param attr_name Name of the graph attribute.
    * \return Reference to self.
    */
-  PassFunctionReg& provide_graph_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassCreatorReg& provide_graph_attr(const std::string& attr_name) {  // NOLINT(*)
     graph_attr_targets.push_back(attr_name);
     return *this;
   }
@@ -88,7 +105,7 @@ struct PassFunctionReg
    * \param attr_name Name of the attribute.
    * \return Reference to self.
    */
-  PassFunctionReg& depend_op_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassCreatorReg& depend_op_attr(const std::string& attr_name) {  // NOLINT(*)
     op_attr_dependency.push_back(attr_name);
     return *this;
   }
@@ -98,7 +115,7 @@ struct PassFunctionReg
    * \param attr_name Name of the attribute.
    * \return Reference to self.
    */
-  PassFunctionReg& depend_graph_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassCreatorReg& depend_graph_attr(const std::string& attr_name) {  // NOLINT(*)
     graph_attr_dependency.push_back(attr_name);
     return *this;
   }
@@ -121,7 +138,44 @@ struct PassFunctionReg
  * \endcode
  */
 #define NNVM_REGISTER_PASS(name)                                     \
-  DMLC_REGISTRY_REGISTER(::nnvm::PassFunctionReg, PassFunctionReg, name)
+  DMLC_REGISTRY_REGISTER(::nnvm::PassCreatorReg, PassCreatorReg, name)
+
+class PassManager {
+ public:
+  PassManager& Enable(const std::string& pass) {
+    return Enable({pass});
+  }
+
+  PassManager& Enable(const std::vector<std::string>& passes) {
+    enabled_passes_.insert(enabled_passes_.end(), passes.begin(), passes.end());
+    return *this;
+  }
+
+  PassManager& EnforceOrder(const std::string& prev, const std::string& succ) {
+    enforced_orders_.push_back(std::make_pair(prev, succ));
+    return *this;
+  }
+
+  PassManager& SetPassArguments(const std::string& pass, const PassArgument& args) {
+    CHECK(pass_arguments_.find(pass) == pass_arguments_.end())
+      << "Arguments for pass \"" << pass << "\" have already been set.";
+    pass_arguments_[pass] = args;
+    return *this;
+  }
+
+  PassResult Run(Graph src);
+
+  static std::unique_ptr<PassManager> Create();
+
+ private:
+  PassManager();
+
+  std::vector<std::string> enabled_passes_;
+  std::unordered_map<std::string, PassArgument> pass_arguments_;
+  std::vector<std::pair<std::string, std::string>>> enforced_orders_;
+
+  std::vector<std::unique_ptr<Pass>> ordered_passes_;
+};
 
 }  // namespace nnvm
 
