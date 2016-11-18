@@ -53,6 +53,10 @@ class Graph {
   template<typename T>
   inline T& GetAttr(const std::string& attr_name);
 
+  inline bool HasAttr(const std::string& attr_name) const {
+    return attrs.count(attr_name) != 0;
+  }
+
   /*!
    * \brief Get a move copy of the attribute, implement copy on write semantics.
    *  The content is moved if the reference counter of shared_ptr is 1.
@@ -67,7 +71,7 @@ class Graph {
 
   template<typename T>
   inline const T& GetGraphAttr(const std::string& attr_name) const {
-    return this->GetAttr(attr_name);
+    return this->GetAttr<T>(attr_name);
   }
 
   // Note: NOT THREAD SAFE!
@@ -281,7 +285,7 @@ inline const T& Graph::GetAttr(const std::string& attr_name) const {
 }
 
 template<typename T>
-inline const T& Graph::GetAttr(const std::string& attr_name) const {
+inline T& Graph::GetAttr(const std::string& attr_name) {
   auto it = attrs.find(attr_name);
   CHECK(it != attrs.end())
       << "Cannot find attribute " << attr_name << " in the graph";

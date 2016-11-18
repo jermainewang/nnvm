@@ -40,7 +40,7 @@ struct PassResult {
 };
 
 struct PassArgument {
-  std::vector<std::string, any> kwargs;
+  std::shared_ptr<any> value;
 };
 
 /*!
@@ -56,9 +56,9 @@ struct PassArgument {
  */
 class Pass {
  public:
-  virtual void Setup() = 0;
+  virtual void Setup() {}
   virtual PassResult RunOnGraph(Graph src, const PassArgument& args) = 0;
-  virtual void Finalize() = 0;
+  virtual void Finalize() {}
 };
 
 typedef std::function<std::unique_ptr<Pass> ()> PassCreator;
@@ -66,9 +66,8 @@ typedef std::function<std::unique_ptr<Pass> ()> PassCreator;
 /*!
  * \brief Registry entry for DataIterator factory functions.
  */
-struct PassCreatorReg
-    : public dmlc::FunctionRegEntryBase<PassCreatorReg,
-                                        PassCreator> {
+struct PassReg
+    : public dmlc::FunctionRegEntryBase<PassReg, PassCreator> {
   /*!
    * \brief Whether the pass will change graph structure
    *  If this is false, the pass will only change attributes.
@@ -85,7 +84,7 @@ struct PassCreatorReg
    * \param v If true, the pass will change graph structure.
    * \return Reference to self.
    */
-  PassCreatorReg& set_change_graph(bool v) {  // NOLINT(*)
+  PassReg& set_change_graph(bool v) {  // NOLINT(*)
     change_graph = v;
     return *this;
   }
@@ -95,7 +94,7 @@ struct PassCreatorReg
    * \param attr_name Name of the graph attribute.
    * \return Reference to self.
    */
-  PassCreatorReg& provide_graph_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassReg& provide_graph_attr(const std::string& attr_name) {  // NOLINT(*)
     graph_attr_targets.push_back(attr_name);
     return *this;
   }
@@ -105,7 +104,7 @@ struct PassCreatorReg
    * \param attr_name Name of the attribute.
    * \return Reference to self.
    */
-  PassCreatorReg& depend_op_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassReg& depend_op_attr(const std::string& attr_name) {  // NOLINT(*)
     op_attr_dependency.push_back(attr_name);
     return *this;
   }
@@ -115,7 +114,7 @@ struct PassCreatorReg
    * \param attr_name Name of the attribute.
    * \return Reference to self.
    */
-  PassCreatorReg& depend_graph_attr(const std::string& attr_name) {  // NOLINT(*)
+  PassReg& depend_graph_attr(const std::string& attr_name) {  // NOLINT(*)
     graph_attr_dependency.push_back(attr_name);
     return *this;
   }
@@ -123,7 +122,7 @@ struct PassCreatorReg
 
 /*!
  * \def NNVM_REGISTER_PASS
- * \brief Macro to register pass fuctions.
+ * \brief Macro to register pass class.
  *
  * \code
  * // example of registering a shape inference pass
@@ -131,19 +130,20 @@ struct PassCreatorReg
  * .describe("Shape Inference function, generate graph attributes")
  * .provide_graph_attr("data_shape")
  * .depend_graph_attr("indexed_graph")
- * .depend_op_attr("infer_shape")
- * .set_body([](const Graph& g) {
- *     // shape inference logic
- *   });
+ * .depend_op_attr("infer_shape");
  * \endcode
  */
-#define NNVM_REGISTER_PASS(name)                                     \
-  DMLC_REGISTRY_REGISTER(::nnvm::PassCreatorReg, PassCreatorReg, name)
+#define NNVM_REGISTER_PASS_CLASS(clsname)                                       \
+  DMLC_REGISTRY_REGISTER(::nnvm::PassReg, PassReg, clsname) \
+    .set_body([]() { return std::unique_ptr<clsname>(new clsname); })
+
+#define NNVM_REGISTER_PASS(name)                         \
+  DMLC_REGISTRY_REGISTER(::nnvm::PassReg, PassReg, name)
 
 class PassManager {
  public:
   PassManager& Enable(const std::string& pass) {
-    return Enable({pass});
+    return this->Enable(std::vector<std::string>({pass}));
   }
 
   PassManager& Enable(const std::vector<std::string>& passes) {
@@ -156,10 +156,11 @@ class PassManager {
     return *this;
   }
 
-  PassManager& SetPassArguments(const std::string& pass, const PassArgument& args) {
+  PassManager& SetPassArguments(const std::string& pass,
+                                const std::shared_ptr<any>& arg_value) {
     CHECK(pass_arguments_.find(pass) == pass_arguments_.end())
       << "Arguments for pass \"" << pass << "\" have already been set.";
-    pass_arguments_[pass] = args;
+    pass_arguments_[pass] = arg_value;
     return *this;
   }
 
@@ -171,8 +172,8 @@ class PassManager {
   PassManager();
 
   std::vector<std::string> enabled_passes_;
-  std::unordered_map<std::string, PassArgument> pass_arguments_;
-  std::vector<std::pair<std::string, std::string>>> enforced_orders_;
+  std::unordered_map<std::string, std::shared_ptr<any>> pass_arguments_;
+  std::vector<std::pair<std::string, std::string>> enforced_orders_;
 
   std::vector<std::unique_ptr<Pass>> ordered_passes_;
 };
