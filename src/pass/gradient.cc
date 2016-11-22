@@ -71,7 +71,7 @@ class GradientPass : public Pass {
       output_grads[args.ys[i].node.get()][args.ys[i].index].grads = { args.ys_out_grad[i] };
     }
 
-    // construct mirror reduece memory strategy if needed
+    // Construct mirror nodes to reduce memory consumption.
     unordered_map<Node*, NodePtr> mirror_map;
     if (!args.mirror_fun) {
       for (const NodePtr& n : topo_order) {
@@ -92,25 +92,31 @@ class GradientPass : public Pass {
       }
     }
 
-    // traverse backward
+    // Traverse backward.
     static auto& grad_fun_map = Op::GetAttr<FGradient>("FGradient");
+    // Temporary space for output gradients.
     vector<NodeEntry> out_agg_grads;
     for (auto rit = topo_order.rbegin(); rit != topo_order.rend(); ++rit) {
       const NodePtr& ptr = *rit;
-      if (ptr->is_variable()) continue;
+      if (ptr->is_variable()) {
+        // Do nothing for variable nodes.
+        continue;
+      }
       out_agg_grads.clear();
       for (GradEntry& e : output_grads.at(ptr.get())) {
         e.sum = agg_fun(std::move(e.grads));
         out_agg_grads.push_back(e.sum);
       }
-      if ((*rit)->inputs.size() != 0) {
-        vector<NodeEntry> input_grads = grad_fun_map[ptr->op()]
+      if (ptr->inputs.size() != 0) {
+        const vector<NodeEntry>& input_grads = grad_fun_map[ptr->op()]
             (mirror_map.size() == 0 ? ptr : mirror_map.at(ptr.get()), out_agg_grads);
-        CHECK_EQ((*rit)->inputs.size(), input_grads.size())
+        CHECK_EQ(ptr->inputs.size(), input_grads.size())
             << "Gradient function not returning enough gradient";
-        auto git = input_grads.begin();
-        for (auto it = (*rit)->inputs.begin(); it != (*rit)->inputs.end(); ++it, ++git) {
-          output_grads[it->node.get()][it->index].grads.emplace_back(std::move(*git));
+        for (size_t i = 0; i < ptr->inputs.size(); ++i) {
+          const NodeEntry& in_entry = ptr->inputs[i];
+          const NodeEntry& in_grad_entry = input_grads[i];
+          output_grads[in_entry.node.get()][in_entry.index].grads.emplace_back(
+              std::move(in_grad_entry));
         }
       }
     }
@@ -125,7 +131,6 @@ class GradientPass : public Pass {
       }
       ret.graph.outputs.emplace_back(std::move(entry.sum));
     }
-    // TODO(minjie): remap forward node in the backward graph.
     return ret;
   }
 };
@@ -133,7 +138,8 @@ class GradientPass : public Pass {
 // register pass
 NNVM_REGISTER_PASS_CLASS(GradientPass)
 .describe("Return a gradient graph of src.attrs[\"ys\"] wrt src.attrs[\"xs\"]")
-.set_change_graph(true);
+.set_change_graph(true)
+.preserve_all(attr::kNode | attr::kNodeEntry);
 
 }  // namespace
 }  // namespace pass

@@ -19,6 +19,13 @@
 namespace nnvm {
 
 class IndexedGraph;
+static const uint32_t kInvalidId = 0xffffffff;
+
+namespace attr {
+  static const int kGraph = 1;
+  static const int kNode = 2;
+  static const int kNodeEntry = 4;
+};  // namespace attr
 
 /*!
  * \brief Symbolic computation graph.
@@ -26,6 +33,8 @@ class IndexedGraph;
  */
 class Graph {
  public:
+  static const std::string kNodeAttrPrefix;
+  static const std::string kNodeEntryAttrPrefix;
   /*! \brief outputs of the computation graph. */
   std::vector<NodeEntry> outputs;
   /*!
@@ -108,19 +117,6 @@ class Graph {
     this->SetGraphAttr(kNodeEntryAttrPrefix + attr_name, attrs);
   }
 
-  template<typename T>
-  inline const T& GetPassAttr(const std::string& attr_name,
-                              const std::string& pass_name) const {
-    return this->GetGraphAttr<T>(kPassAttrPrefix + pass_name + attr_name);
-  }
-
-  template<typename T>
-  inline void SetPassAttr(const std::string& attr_name,
-                          const std::string& pass_name,
-                          const T& value) {
-    this->SetGraphAttr(kPassAttrPrefix + pass_name + attr_name, value);
-  }
-
   /*!
    * \brief get a indexed graph of current graph, if not exist, create it on demand
    * \return The indexed graph.
@@ -129,9 +125,6 @@ class Graph {
   const IndexedGraph& indexed_graph();
 
  private:
-  static const std::string kNodeAttrPrefix;
-  static const std::string kNodeEntryAttrPrefix;
-  static const std::string kPassAttrPrefix;
   // internal structure of indexed graph
   std::shared_ptr<const IndexedGraph> indexed_graph_;
 };

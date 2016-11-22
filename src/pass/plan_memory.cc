@@ -5,6 +5,7 @@
  */
 #include <nnvm/graph.h>
 #include <nnvm/pass.h>
+#include <nnvm/pass_functions.h>
 #include <nnvm/graph_attr_types.h>
 #include <nnvm/op_attr_types.h>
 #include <memory>
@@ -134,107 +135,121 @@ class GraphAllocator {
 };
 
 // function to plan memory
-Graph PlanMemory(Graph ret) {
-  // setup ref counter
-  const IndexedGraph& idx = ret.indexed_graph();
-  // reference counter of each node
-  std::vector<uint32_t> ref_count(idx.num_node_entries(), 0);
-  // step 1: initialize reference count
-  for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
-    for (const auto& e : idx[nid].inputs) {
+class PlanMemoryPass : public Pass {
+ public:
+  PassResult RunOnGraph(Graph src, const PassArgument& pargs) override {
+    PassResult ret;
+    ret.graph = src;
+    // setup ref counter
+    const IndexedGraph& idx = src.indexed_graph();
+    // reference counter of each node
+    std::vector<uint32_t> ref_count(idx.num_node_entries(), 0);
+    // step 1: initialize reference count
+    for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
+      for (const auto& e : idx[nid].inputs) {
+        ++ref_count[idx.entry_id(e)];
+      }
+    }
+    for (const auto& e : idx.outputs()) {
       ++ref_count[idx.entry_id(e)];
     }
-  }
-  for (const auto& e : idx.outputs()) {
-    ++ref_count[idx.entry_id(e)];
-  }
-  // step 2: allocate memory.
-  StorageVector storage(idx.num_node_entries(), -1);
-  std::vector<int> storage_inplace_index(idx.num_node_entries(), -1);
-  const ShapeVector& shape_vec = ret.GetAttr<ShapeVector>("shape");
-  const DTypeVector& dtype_vec = ret.GetAttr<DTypeVector>("dtype");
-  const DeviceVector* device_vec = nullptr;
-  static auto& finplace_option = Op::GetAttr<FInplaceOption>("FInplaceOption");
+    // step 2: allocate memory.
+    StorageVector storage(idx.num_node_entries(), GraphAllocator::kBadStorageID);
+    // TODO(minjie): define this constant.
+    std::vector<int> storage_inplace_index(idx.num_node_entries(), -1);
+    static auto& finplace_option = Op::GetAttr<FInplaceOption>("FInplaceOption");
 
-  if (ret.attrs.count("device") != 0) {
-    device_vec = &(ret.GetAttr<DeviceVector>("device"));
-  }
-  // the allocator.
-  GraphAllocator allocator(&idx);
-  // number of entries that are not statically allocated.
-  size_t num_not_allocated = 0;
+    // The memory allocation algorithm.
+    GraphAllocator allocator(&idx);
+    // Number of entries that are not statically allocated.
+    size_t num_not_allocated = 0;
 
-  for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
-    const auto& inode = idx[nid];
-    if (inode.source->is_variable()) continue;
-    // check inplace option
-    if (finplace_option.count(inode.source->op()) != 0) {
-      auto inplace_pairs = finplace_option[inode.source->op()](inode.source->attrs);
-      for (auto& kv : inplace_pairs) {
-        uint32_t eid_out = idx.entry_id(nid, kv.second);
-        uint32_t eid_in = idx.entry_id(inode.inputs[kv.first]);
-        if (ref_count[eid_in] == 1 &&
-            ref_count[eid_out] != 0 &&
-            storage[eid_out] == GraphAllocator::kBadStorageID &&
-            storage[eid_in] != GraphAllocator::kBadStorageID &&
-            shape_vec[eid_out].Size() == shape_vec[eid_in].Size() &&
-            dtype_vec[eid_out] == dtype_vec[eid_in]) {
-          // inplace optimization
-          storage[eid_out] = storage[eid_in];
-          ref_count[eid_in] = 0;
-          storage_inplace_index[eid_out] = kv.first;
+    for (uint32_t nid = 0; nid < idx.num_nodes(); ++nid) {
+      const auto& inode = idx[nid];
+      if (inode.source->is_variable()) {
+        // No storage planning for variable nodes since they should be pre-allocated.
+        continue;
+      }
+      // Check inplace option.
+      if (finplace_option.count(inode.source->op()) != 0) {
+        auto inplace_pairs = finplace_option[inode.source->op()](inode.source->attrs);
+        for (const auto& kv : inplace_pairs) {
+          const uint32_t eid_out = idx.entry_id(nid, kv.second);
+          const uint32_t eid_in = idx.entry_id(inode.inputs[kv.first]);
+          const TShape& out_shape = src.GetNodeEntryAttr<TShape>("shape", eid_out);
+          const TShape& in_shape = src.GetNodeEntryAttr<TShape>("shape", eid_in);
+          const int out_dtype = src.GetNodeEntryAttr<int>("dtype", eid_out);
+          const int in_dtype = src.GetNodeEntryAttr<int>("dtype", eid_in);
+          if (ref_count[eid_in] == 1 &&
+              ref_count[eid_out] != 0 &&
+              storage[eid_out] == GraphAllocator::kBadStorageID &&
+              storage[eid_in] != GraphAllocator::kBadStorageID &&
+              out_shape.Size() == in_shape.Size() &&
+              out_dtype == in_dtype) {
+            // inplace optimization
+            storage[eid_out] = storage[eid_in];
+            ref_count[eid_in] = 0;
+            storage_inplace_index[eid_out] = kv.first;
+          }
+        }
+      }
+      // normal allocation
+      const int dev_id = src.GetNodeAttr<int>("device", nid);
+      // allocate output
+      for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
+        const uint32_t eid = idx.entry_id(nid, index);
+        const TShape& shape = src.GetNodeEntryAttr<TShape>("shape", eid);
+        const int dtype = src.GetNodeEntryAttr<int>("dtype", eid);
+        if (storage[eid] == GraphAllocator::kBadStorageID) {
+          storage[eid] = allocator.Request(dev_id, dtype, shape, nid);
+        }
+      }
+      // then free inputs
+      for (const auto& e : inode.inputs) {
+        const uint32_t eid = idx.entry_id(e);
+        // temp_ref_count == 0 means it is taken by inplace op
+        if (ref_count[eid] == 0) continue;
+        // if we decrease it to zero, means we are ready to relase
+        --ref_count[eid];
+        if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
+          allocator.Release(storage[eid], nid);
+        }
+      }
+      // check if there are outputs that can be freeded immediately
+      // these output are not referenced by any operator.
+      for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
+        const uint32_t eid = idx.entry_id(nid, index);
+        if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
+          allocator.Release(storage[eid], nid);
+          // use -2 to indicate that the node was never touched.
+          // TODO(minjie): define this constant.
+          storage_inplace_index[eid] = -2;
+        }
+        if (storage[eid] == GraphAllocator::kBadStorageID) {
+          ++num_not_allocated;
         }
       }
     }
-    // normal allocation
-    const int dev_id = (device_vec != nullptr) ? device_vec->at(nid) : 0;
-    // allocate output
-    for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
-      uint32_t eid = idx.entry_id(nid, index);
-      if (storage[eid] == GraphAllocator::kBadStorageID) {
-        storage[eid] = allocator.Request(dev_id, dtype_vec[eid], shape_vec[eid], nid);
-      }
-    }
-    // then free inputs
-    for (const auto& e : inode.inputs) {
-      uint32_t eid = idx.entry_id(e);
-      // temp_ref_count == 0 means it is taken by inplace op
-      if (ref_count[eid] == 0) continue;
-      // if we decrease it to zero, means we are ready to relase
-      --ref_count[eid];
-      if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
-        allocator.Release(storage[eid], nid);
-      }
-    }
-    // check if there are outputs that can be freeded immediately
-    // these output are not referenced by any operator.
-    for (uint32_t index = 0; index < inode.source->num_outputs(); ++index) {
-      uint32_t eid = idx.entry_id(nid, index);
-      if (ref_count[eid] == 0 && storage[eid] != GraphAllocator::kBadStorageID) {
-        allocator.Release(storage[eid], nid);
-        // use -2 to indicate that the node was never touched.
-        storage_inplace_index[eid] = -2;
-      }
-      if (storage[eid] == GraphAllocator::kBadStorageID) {
-        ++num_not_allocated;
-      }
-    }
+    ret.graph.SetNodeEntryAttr("storage_id", std::move(storage));
+    ret.graph.SetNodeEntryAttr("storage_inplace_index", std::move(storage_inplace_index));
+    ret.graph.SetGraphAttr("storage_allocated_bytes", allocator.TotalAllocBytes());
+    ret.graph.SetGraphAttr("storage_num_not_allocated", num_not_allocated);
+    return ret;
   }
-  ret.attrs["storage_id"] = std::make_shared<any>(std::move(storage));
-  ret.attrs["storage_inplace_index"] = std::make_shared<any>(std::move(storage_inplace_index));
-  ret.attrs["storage_allocated_bytes"] = std::make_shared<any>(allocator.TotalAllocBytes());
-  ret.attrs["storage_num_not_allocated"] = std::make_shared<any>(num_not_allocated);
-  return ret;
-}
+};
 
-NNVM_REGISTER_PASS(PlanMemory)
+NNVM_REGISTER_PASS_CLASS(PlanMemoryPass)
 .describe("Plan the memory allocation of each node entries.")
-.set_body(PlanMemory)
 .set_change_graph(false)
-.depend_graph_attr("dtype")
-.depend_graph_attr("shape")
-.provide_graph_attr("storage_id")
-.provide_graph_attr("storage_inplace_index");
+.depend_op_attr("FInplaceOption")
+.depend_entry_attr("dtype")
+.depend_entry_attr("shape")
+.depend_node_attr("device")
+.provide_entry_attr("storage_id")
+.provide_entry_attr("storage_inplace_index")
+.provide_graph_attr("storage_allocated_bytes")
+.provide_graph_attr("storage_num_not_allocated")
+.preserve_all();
 
 }  // namespace
 }  // namespace pass

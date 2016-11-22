@@ -51,8 +51,7 @@ class InferAttrPass : public Pass {
     const InferAttrPassArgs<AttrType>& args =
       nnvm::get<InferAttrPassArgs<AttrType>>(*pargs.value);
 
-    CHECK(!src.HasAttr(attr_name_));
-    // reshape shape vector
+    // Create attribute vector.
     AttrVector ret_attrs(idx.num_node_entries(), empty_val_);
 
     if (!args.input_attrs.empty()) {
@@ -212,7 +211,8 @@ NNVM_REGISTER_PASS(InferShape)
         nullptr);
     })
 .set_change_graph(false)
-.provide_graph_attr("shape");
+.provide_entry_attr("shape")
+.preserve_all();
 
 // Inference function for operators that have same types for inputs/outputs.
 // The function will try find known types in the given inputs and outputs,
@@ -239,6 +239,7 @@ inline bool SameType(const NodeAttrs& ,
   if (def_v == kUnknownType) {
     return false;
   } else {
+    // Fill both inputs and outputs with the type found.
     std::fill(iattr->begin(), iattr->end(), def_v);
     std::fill(oattr->begin(), oattr->end(), def_v);
     return true;
@@ -254,7 +255,8 @@ NNVM_REGISTER_PASS(InferType)
         SameType);
   })
 .set_change_graph(false)
-.provide_graph_attr("dtype");
+.provide_entry_attr("dtype")
+.preserve_all();
 
 DMLC_JSON_ENABLE_ANY(ShapeVector, list_shape);
 DMLC_JSON_ENABLE_ANY(DTypeVector, list_int);

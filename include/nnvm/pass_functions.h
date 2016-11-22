@@ -30,6 +30,9 @@ namespace pass {
 //  ret.attrs["json"] = std::make_shared<any>(json_str);
 //  return ApplyPass(ret, "LoadJSON");
 //}
+struct LoadJSONPassArgs {
+  std::string json;
+};
 
 /*!
  * \brief Save a graph to json, redirects to "SaveJSON" pass.
@@ -87,6 +90,8 @@ struct InferAttrPassArgs {
   std::string node_attr_key;
 };
 
+typedef InferAttrPassArgs<TShape> InferShapePassArgs;
+
 /*!
  * \brief Infer types in the graph given the information.
  * \param graph The input graph.
@@ -107,6 +112,7 @@ struct InferAttrPassArgs {
 //  }
 //  return ApplyPass(std::move(graph), "InferType");
 //}
+typedef InferAttrPassArgs<int> InferTypePassArgs;
 
 /*!
  * \brief Place the devices for each operator in the graph.
@@ -131,6 +137,11 @@ struct InferAttrPassArgs {
 //  graph.attrs["device_copy_op"] = std::make_shared<any>(std::move(device_copy_op));
 //  return ApplyPass(std::move(graph), "PlaceDevice");
 //}
+struct PlaceDevicePassArgs {
+  std::string device_group_attr_key;
+  DeviceAssignMap device_assign_map;
+  std::string device_copy_op;
+};
 
 /*!
  * \brief Get the gradient graph whose outputs are gradients of xs wrt to ys.

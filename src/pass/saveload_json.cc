@@ -158,93 +158,94 @@ struct JSONGraph {
 };
 
 // Load a graph from JSON file.
-Graph LoadJSON(Graph src) {
-  CHECK_NE(src.attrs.count("json"), 0)
-      << "Load JSON require json to be presented.";
-  const std::string &json_str =
-      nnvm::get<std::string>(*src.attrs.at("json"));
-  std::istringstream is(json_str);
-  dmlc::JSONReader reader(&is);
-  JSONGraph jgraph;
-  // load in json graph.
-  jgraph.Load(&reader);
-  // connects the nodes
-  for (JSONNode &n : jgraph.nodes) {
-    n.node->inputs.reserve(n.inputs.size());
-    for (const JSONNode::Entry &e : n.inputs) {
-      n.node->inputs.emplace_back(
+class LoadJSONPass : public Pass {
+ public:
+  PassResult RunOnGraph(Graph src, const PassArgument& pargs) override {
+    const LoadJSONPassArgs& args = nnvm::get<LoadJSONPassArgs>(pargs.value);
+    std::istringstream is(args.json);
+    dmlc::JSONReader reader(&is);
+    JSONGraph jgraph;
+    // load in json graph.
+    jgraph.Load(&reader);
+    // connects the nodes
+    for (JSONNode &n : jgraph.nodes) {
+      n.node->inputs.reserve(n.inputs.size());
+      for (const JSONNode::Entry &e : n.inputs) {
+        n.node->inputs.emplace_back(
+            NodeEntry{jgraph.nodes[e.node_id].node, e.index, e.version});
+      }
+      n.node->control_deps.reserve(n.control_deps.size());
+      for (uint32_t nid : n.control_deps) {
+        n.node->control_deps.push_back(jgraph.nodes[nid].node);
+      }
+    }
+    // consistent check
+    for (uint32_t nid : jgraph.arg_nodes) {
+      CHECK(jgraph.nodes[nid].node->is_variable());
+    }
+
+    // return the graph
+    PassResult ret;
+    ret.graph.attrs = std::move(jgraph.attrs);
+    ret.graph.outputs.reserve(jgraph.heads.size());
+    for (const JSONNode::Entry &e : jgraph.heads) {
+      ret.graph.outputs.emplace_back(
           NodeEntry{jgraph.nodes[e.node_id].node, e.index, e.version});
     }
-    n.node->control_deps.reserve(n.control_deps.size());
-    for (uint32_t nid : n.control_deps) {
-      n.node->control_deps.push_back(jgraph.nodes[nid].node);
-    }
+    return ret;
   }
-  // consistent check
-  for (uint32_t nid : jgraph.arg_nodes) {
-    CHECK(jgraph.nodes[nid].node->is_variable());
-  }
-
-  // return the graph
-  Graph ret;
-  ret.attrs = std::move(jgraph.attrs);
-  ret.outputs.reserve(jgraph.heads.size());
-  for (const JSONNode::Entry &e : jgraph.heads) {
-    ret.outputs.emplace_back(
-        NodeEntry{jgraph.nodes[e.node_id].node, e.index, e.version});
-  }
-  return ret;
-}
+};
 
 // save a graph to json
-Graph SaveJSON(Graph src) {
-  JSONGraph jgraph;
-  std::unordered_map<Node*, uint32_t> node2index;
-  jgraph.node_row_ptr.push_back(0);
-  DFSVisit(src.outputs, [&node2index, &jgraph](const NodePtr& n) {
-      uint32_t nid = static_cast<uint32_t>(jgraph.nodes.size());
-      node2index[n.get()] = nid;
-      if (n->is_variable()) {
-        jgraph.arg_nodes.push_back(nid);
-      }
-      JSONNode jnode;
-      jnode.node = n;
-      jnode.inputs.reserve(n->inputs.size());
-      for (const NodeEntry& e : n->inputs) {
-        jnode.inputs.emplace_back(
-            JSONNode::Entry{node2index.at(e.node.get()), e.index, e.version});
-      }
-      for (const NodePtr& c : n->control_deps) {
-        jnode.control_deps.push_back(node2index.at(c.get()));
-      }
-      jgraph.node_row_ptr.push_back(
-          jgraph.node_row_ptr.back() + n->num_outputs());
-      jgraph.nodes.emplace_back(std::move(jnode));
-    });
+class SaveJSONPass : public Pass {
+ public:
+  PassResult RunOnGraph(Graph src, const PassArgument& pargs) override {
+    JSONGraph jgraph;
+    std::unordered_map<Node*, uint32_t> node2index;
+    jgraph.node_row_ptr.push_back(0);
+    DFSVisit(src.outputs, [&node2index, &jgraph](const NodePtr& n) {
+        uint32_t nid = static_cast<uint32_t>(jgraph.nodes.size());
+        node2index[n.get()] = nid;
+        if (n->is_variable()) {
+          jgraph.arg_nodes.push_back(nid);
+        }
+        JSONNode jnode;
+        jnode.node = n;
+        jnode.inputs.reserve(n->inputs.size());
+        for (const NodeEntry& e : n->inputs) {
+          jnode.inputs.emplace_back(
+              JSONNode::Entry{node2index.at(e.node.get()), e.index, e.version});
+        }
+        for (const NodePtr& c : n->control_deps) {
+          jnode.control_deps.push_back(node2index.at(c.get()));
+        }
+        jgraph.node_row_ptr.push_back(
+            jgraph.node_row_ptr.back() + n->num_outputs());
+        jgraph.nodes.emplace_back(std::move(jnode));
+      });
 
-  for (const NodeEntry& e : src.outputs) {
-    jgraph.heads.push_back(
-        JSONNode::Entry{node2index.at(e.node.get()), e.index, e.version});
+    for (const NodeEntry& e : src.outputs) {
+      jgraph.heads.push_back(
+          JSONNode::Entry{node2index.at(e.node.get()), e.index, e.version});
+    }
+
+    std::ostringstream os;
+    dmlc::JSONWriter writer(&os);
+    jgraph.Save(&writer);
+    PassResult ret;
+    // TODO(minjie): why not return the original graph?
+    ret.graph.SetGraphAttr("json", os.str());
+    return ret;
   }
-
-  std::ostringstream os;
-  dmlc::JSONWriter writer(&os);
-  jgraph.Save(&writer);
-  Graph ret;
-  ret.attrs["json"] = std::make_shared<any>(os.str());
-  return ret;
-}
+};
 
 // register pass
-NNVM_REGISTER_PASS(LoadJSON)
+NNVM_REGISTER_PASS_CLASS(LoadJSONPass)
 .describe("Return a new Graph, loaded from src.attrs[\"json\"]")
-.set_body(LoadJSON)
-.set_change_graph(true)
-.depend_graph_attr("json");
+.set_change_graph(true);
 
-NNVM_REGISTER_PASS(SaveJSON)
+NNVM_REGISTER_PASS_CLASS(SaveJSONPass)
 .describe("Return a new empty Graph. Save graph to ret.attrs[\"json\"]")
-.set_body(SaveJSON)
 .set_change_graph(true)
 .provide_graph_attr("json");
 
