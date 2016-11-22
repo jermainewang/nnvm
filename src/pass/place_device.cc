@@ -86,7 +86,7 @@ class PlaceDevicePass : public Pass {
     if (!has_multiple_devices) {
       // Only one device in the graph, no need to instrument copy nodes.
       ret.graph = src;
-      ret.graph.SetNodeAttr("device", std::move(device));
+      ret.graph.MoveNodeAttr("device", std::move(device));
       return ret;
     }
 

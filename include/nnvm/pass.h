@@ -15,23 +15,44 @@
 namespace nnvm {
 
 /*!
- * \brief Apply a series of pass transformations on the input graph.
+ * \brief [DEPRECATED] Apply a series of pass transformations on the input graph.
  * \param src The graph to be transformed.
  * \param passes A list of pass names to be applied.
  * \return The transformed graph
  */
-//Graph ApplyPasses(Graph src,
-                  //const std::vector<std::string>& passes);
+Graph ApplyPasses(Graph src,
+                  const std::vector<std::string>& passes,
+                  const std::vector<std::shared_ptr<any>>& args);
 
 /*!
- * \brief Apply one pass to the graph.
+ * \brief [DEPRECATED] Apply passes with no arguments.
+ */
+inline Graph ApplyPasses(Graph src,
+                         const std::vector<std::string>& passes) {
+  return ApplyPasses(src, passes,
+      std::vector<std::shared_ptr<any>>(passes.size(), nullptr));
+}
+
+/*!
+ * \brief [DEPRECATED] Apply one pass to the graph.
  * \param src The graph to be transformed.
  * \param pass The name of pass to be applied.
  * \return The transformed graph.
  */
-//inline Graph ApplyPass(Graph src, const std::string& pass) {
-  //return ApplyPasses(src, {pass});
-//}
+inline Graph ApplyPass(Graph src,
+                       const std::string& pass,
+                       std::shared_ptr<any> args) {
+  return ApplyPasses(src, {pass}, {args});
+}
+
+/*!
+ * \brief [DEPRECATED] Apply one pass with no argument.
+ */
+inline Graph ApplyPass(Graph src,
+                       const std::string& pass) {
+  return ApplyPasses(src, {pass});
+}
+
 
 struct PassResult {
   Graph graph;
@@ -255,7 +276,7 @@ class PassManager {
   }
 
   PassManager& SetPassArguments(const std::string& pass,
-                                const std::shared_ptr<any>& arg_value) {
+                                std::shared_ptr<any> arg_value) {
     CHECK(pass_arguments_.find(pass) == pass_arguments_.end())
       << "Arguments for pass \"" << pass << "\" have already been set.";
     pass_arguments_[pass] = arg_value;

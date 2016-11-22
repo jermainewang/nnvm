@@ -12,9 +12,8 @@ DMLC_REGISTRY_ENABLE(nnvm::PassReg);
 }  // namespace dmlc
 
 namespace nnvm {
-
-/*const PassFunctionReg* FindPassDep(const std::string&attr_name) {
-  for (auto* r : dmlc::Registry<PassFunctionReg>::List()) {
+/*const PassReg* FindPassDep(const std::string&attr_name) {
+  for (auto* r : dmlc::Registry<PassReg>::List()) {
     for (auto& s : r->graph_attr_targets) {
       if (s == attr_name) return r;
     }
@@ -24,9 +23,9 @@ namespace nnvm {
 
 Graph ApplyPasses(Graph g,
                   const std::vector<std::string>& pass) {
-  std::vector<const PassFunctionReg*> fpass;
+  std::vector<const PassReg*> fpass;
   for (auto& name : pass) {
-    auto* reg = dmlc::Registry<PassFunctionReg>::Find(name);
+    auto* reg = dmlc::Registry<PassReg>::Find(name);
     CHECK(reg != nullptr)
         << "Cannot find pass " << name << " in the registry";
     fpass.push_back(reg);
@@ -51,5 +50,18 @@ Graph ApplyPasses(Graph g,
 
   return g;
 }*/
+
+Graph ApplyPasses(Graph src,
+                  const std::vector<std::string>& passes,
+                  const std::vector<std::shared_ptr<any>>& args) {
+  CHECK_EQ(passes.size(), args.size())
+    << "The number of passes and arguments should be the same";
+  std::unique_ptr<PassManager> pm = PassManager::Create();
+  pm->Enable(passes);
+  for (size_t i = 0; i < passes.size(); ++i) {
+    pm->SetPassArguments(passes[i], args[i]);
+  }
+  return pm->Run(src).graph;
+}
 
 }  // namespace nnvm
