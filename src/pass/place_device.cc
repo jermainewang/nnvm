@@ -202,7 +202,7 @@ class PlaceDevicePass : public Pass {
       }
       new_device_vec[nid] = new_device_map.at(source);
     }
-    ret.graph.SetNodeAttr("device", std::move(new_device_vec));
+    ret.graph.MoveNodeAttr("device", std::move(new_device_vec));
     return ret;
   }
 };

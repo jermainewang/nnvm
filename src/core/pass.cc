@@ -8,12 +8,12 @@
 
 namespace dmlc {
 // enable registry
-DMLC_REGISTRY_ENABLE(nnvm::PassFunctionReg);
+DMLC_REGISTRY_ENABLE(nnvm::PassReg);
 }  // namespace dmlc
 
 namespace nnvm {
 
-const PassFunctionReg* FindPassDep(const std::string&attr_name) {
+/*const PassFunctionReg* FindPassDep(const std::string&attr_name) {
   for (auto* r : dmlc::Registry<PassFunctionReg>::List()) {
     for (auto& s : r->graph_attr_targets) {
       if (s == attr_name) return r;
@@ -50,6 +50,6 @@ Graph ApplyPasses(Graph g,
   }
 
   return g;
-}
+}*/
 
 }  // namespace nnvm

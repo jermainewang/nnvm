@@ -230,10 +230,10 @@ class PlanMemoryPass : public Pass {
         }
       }
     }
-    ret.graph.SetNodeEntryAttr("storage_id", std::move(storage));
-    ret.graph.SetNodeEntryAttr("storage_inplace_index", std::move(storage_inplace_index));
-    ret.graph.SetGraphAttr("storage_allocated_bytes", allocator.TotalAllocBytes());
-    ret.graph.SetGraphAttr("storage_num_not_allocated", num_not_allocated);
+    ret.graph.MoveNodeEntryAttr("storage_id", std::move(storage));
+    ret.graph.MoveNodeEntryAttr("storage_inplace_index", std::move(storage_inplace_index));
+    ret.graph.MoveGraphAttr("storage_allocated_bytes", allocator.TotalAllocBytes());
+    ret.graph.MoveGraphAttr("storage_num_not_allocated", num_not_allocated);
     return ret;
   }
 };

@@ -234,7 +234,7 @@ class SaveJSONPass : public Pass {
     jgraph.Save(&writer);
     PassResult ret;
     // TODO(minjie): why not return the original graph?
-    ret.graph.SetGraphAttr("json", os.str());
+    ret.graph.MoveGraphAttr("json", os.str());
     return ret;
   }
 };

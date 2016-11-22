@@ -77,7 +77,7 @@ class InferAttrPass : public Pass {
       }
       num_unknown = 0;
       for (size_t i = 0; i < idx.num_node_entries(); ++i) {
-        if (fis_none_(ret_attrs[i])) {
+        if (is_none_functor_(ret_attrs[i])) {
           ++num_unknown;
         }
       }
@@ -86,10 +86,9 @@ class InferAttrPass : public Pass {
     PassResult ret;
     ret.graph = src;
     // set the shapes
-    ret.graph.SetNodeEntryAttr(attr_name_, std::make_shared<any>(std::move(ret_attrs)));
+    ret.graph.MoveNodeEntryAttr(attr_name_, std::move(ret_attrs));
     // number of nodes who knows the shape.
-    ret.graph.SetGraphAttr(attr_name_ + "_num_unknown_nodes",
-                           std::make_shared<any>(num_unknown));
+    ret.graph.MoveGraphAttr(attr_name_ + "_num_unknown_nodes", num_unknown);
     return ret;
   }
 
@@ -139,7 +138,7 @@ class InferAttrPass : public Pass {
         CHECK_LE(in_grad.size(), fnode.source->num_outputs());
         for (size_t i = 0; i < in_grad.size(); ++i) {
           uint32_t eid = idx.entry_id(inode.inputs[in_grad[i]]);
-          if (fis_none((*ret_attrs)[eid])) {
+          if (is_none_functor_((*ret_attrs)[eid])) {
             (*ret_attrs)[eid] = (*ret_attrs)[idx.entry_id(inode.control_deps[0], i)];
           }
         }
@@ -150,12 +149,12 @@ class InferAttrPass : public Pass {
       ishape.resize(num_inputs, empty_val_);
       for (uint32_t i = 0; i < ishape.size(); ++i) {
         ishape[i] = (*ret_attrs)[idx.entry_id(inode.inputs[i])];
-        if (fis_none(ishape[i])) forward_known = false;
+        if (is_none_functor_(ishape[i])) forward_known = false;
       }
       oshape.resize(num_outputs, empty_val_);
       for (uint32_t i = 0; i < oshape.size(); ++i) {
         oshape[i] = (*ret_attrs)[idx.entry_id(nid, i)];
-        if (fis_none(oshape[i])) forward_known = false;
+        if (is_none_functor_(oshape[i])) forward_known = false;
       }
       if (!forward_known) {
         auto finfer = finfer_shape_.get(inode.source->op(), default_infer_functor_);
@@ -212,6 +211,7 @@ NNVM_REGISTER_PASS(InferShape)
     })
 .set_change_graph(false)
 .provide_entry_attr("shape")
+.provide_graph_attr("shape_num_unknown_nodes")
 .preserve_all();
 
 // Inference function for operators that have same types for inputs/outputs.
@@ -256,6 +256,7 @@ NNVM_REGISTER_PASS(InferType)
   })
 .set_change_graph(false)
 .provide_entry_attr("dtype")
+.provide_entry_attr("dtype_num_unknown_nodes")
 .preserve_all();
 
 DMLC_JSON_ENABLE_ANY(ShapeVector, list_shape);

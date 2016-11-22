@@ -85,8 +85,8 @@ class Graph {
 
   // Note: NOT THREAD SAFE!
   template<typename T>
-  inline void SetGraphAttr(const std::string& attr_name, const T& value) {
-    attrs[attr_name] = value;
+  inline void MoveGraphAttr(const std::string& attr_name, T&& value) {
+    attrs[attr_name] = std::make_shared<any>(value);
   }
 
   template<typename T>
@@ -99,8 +99,8 @@ class Graph {
 
   // Note: NOT THREAD SAFE!
   template<typename T>
-  inline void SetNodeAttr(const std::string& attr_name, const std::vector<T>& attrs) {
-    this->SetGraphAttr(kNodeAttrPrefix + attr_name, attrs);
+  inline void MoveNodeAttr(const std::string& attr_name, std::vector<T>&& attrs) {
+    this->MoveGraphAttr(kNodeAttrPrefix + attr_name, attrs);
   }
 
   template<typename T>
@@ -113,8 +113,8 @@ class Graph {
 
   // Note: NOT THREAD SAFE!
   template<typename T>
-  inline void SetNodeEntryAttr(const std::string& attr_name, const std::vector<T>& attrs) {
-    this->SetGraphAttr(kNodeEntryAttrPrefix + attr_name, attrs);
+  inline void MoveNodeEntryAttr(const std::string& attr_name, std::vector<T>&& attrs) {
+    this->MoveGraphAttr(kNodeEntryAttrPrefix + attr_name, attrs);
   }
 
   /*!
